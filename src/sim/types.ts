@@ -82,3 +82,46 @@ export interface World {
   orders: Map<string, Order>;
   rng: Rng;
 }
+
+export interface MetricsSample {
+  simTimeMs: number;
+  ordersCompleted: number;
+  jobsCompleted: number;
+  throughputPerHour: number;
+  utilisation: number;
+  pendingJobs: number;
+  avgQueueLength: number;
+}
+
+export interface MetricsSummary {
+  simTimeMs: number;
+  ordersCompleted: number;
+  jobsCompleted: number;
+  throughputPerHour: number;
+  throughputWindowPerHour: number;
+  completionTimeMs: {
+    mean: number;
+    p50: number;
+    p90: number;
+    p95: number;
+    p99: number;
+    max: number;
+  };
+  utilisation: {
+    overall: number;
+    idle: number;
+    movingEmpty: number;
+    movingLoaded: number;
+    waiting: number;
+    atStation: number;
+  };
+  jobsPending: number;
+  rejectedAssignments: number;
+  deadlockEvents: number;
+  stations: {
+    id: string;
+    busyFraction: number;
+    avgQueueLength: number;
+    maxQueueLength: number;
+  }[];
+}

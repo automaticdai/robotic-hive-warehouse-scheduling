@@ -9,52 +9,22 @@ import type {
   StationObservation,
 } from './allocation';
 import type { Cell, SimConfig } from './config';
+import { percentile } from './metrics';
 import { findPath, manhattan, updateMovement } from './movement';
-import type { Job, Order, Pod, Robot, RobotStatus, Station, World } from './types';
+import type {
+  Job,
+  MetricsSample,
+  MetricsSummary,
+  Order,
+  Pod,
+  Robot,
+  RobotStatus,
+  Station,
+  World,
+} from './types';
 import { cellKey, createWorld } from './world';
 
-export interface MetricsSample {
-  simTimeMs: number;
-  ordersCompleted: number;
-  jobsCompleted: number;
-  throughputPerHour: number;
-  utilisation: number;
-  pendingJobs: number;
-  avgQueueLength: number;
-}
-
-export interface MetricsSummary {
-  simTimeMs: number;
-  ordersCompleted: number;
-  jobsCompleted: number;
-  throughputPerHour: number;
-  throughputWindowPerHour: number;
-  completionTimeMs: {
-    mean: number;
-    p50: number;
-    p90: number;
-    p95: number;
-    p99: number;
-    max: number;
-  };
-  utilisation: {
-    overall: number;
-    idle: number;
-    movingEmpty: number;
-    movingLoaded: number;
-    waiting: number;
-    atStation: number;
-  };
-  jobsPending: number;
-  rejectedAssignments: number;
-  deadlockEvents: number;
-  stations: {
-    id: string;
-    busyFraction: number;
-    avgQueueLength: number;
-    maxQueueLength: number;
-  }[];
-}
+export type { MetricsSample, MetricsSummary } from './types';
 
 export interface Snapshot {
   timeMs: number;
@@ -82,6 +52,12 @@ const ROBOT_STATE_CODE: Record<RobotStatus, number> = {
   waiting: 3,
   at_station: 4,
 };
+
+interface StationMetricsState {
+  busyTimeMs: number;
+  queueLengthSum: number;
+  maxQueueLength: number;
+}
 
 function sameCell(a: Cell, b: Cell): boolean {
   return a.x === b.x && a.y === b.y;
@@ -123,10 +99,35 @@ export class Simulation {
   private rejectedAssignments = 0;
   private deadlockEvents = 0;
 
+  private readonly robotStateTimeMs: Record<RobotStatus, number> = {
+    idle: 0,
+    moving_empty: 0,
+    moving_loaded: 0,
+    waiting: 0,
+    at_station: 0,
+  };
+  private readonly robotStatusSeen = new Map<string, RobotStatus>();
+  private readonly robotStatusSinceMs = new Map<string, number>();
+  private readonly stationMetrics = new Map<string, StationMetricsState>();
+  private stationTickCount = 0;
+
   constructor(config: SimConfig) {
     this.world = createWorld(config);
     for (const pod of this.world.pods) this.podsById.set(pod.id, pod);
     this.orderGenerator = new OrderGenerator(this.world, config.orders, this.world.rng);
+
+    // R23: state-duration accounting starts at sim time 0.
+    for (const robot of this.world.robots) {
+      this.robotStatusSeen.set(robot.id, robot.status);
+      this.robotStatusSinceMs.set(robot.id, 0);
+    }
+    for (const station of this.world.stations) {
+      this.stationMetrics.set(station.id, {
+        busyTimeMs: 0,
+        queueLengthSum: 0,
+        maxQueueLength: 0,
+      });
+    }
   }
 
   get timeMs(): number {
@@ -286,6 +287,7 @@ export class Simulation {
     this.deadlockEvents += movement.deadlockEvents;
 
     this.resolvePathEndActions();
+    this.recordTickMetrics();
     this.sampleIfDue();
   }
 
@@ -295,26 +297,13 @@ export class Simulation {
       ordersCompleted: this.ordersCompleted,
       jobsCompleted: this.jobsCompleted,
       throughputPerHour: this.throughputPerHour(),
-      // Task 6 owns the rolling window; until then the cumulative figure stands in.
-      throughputWindowPerHour: this.throughputPerHour(),
-      completionTimeMs: { mean: 0, p50: 0, p90: 0, p95: 0, p99: 0, max: 0 },
-      utilisation: {
-        overall: 0,
-        idle: 0,
-        movingEmpty: 0,
-        movingLoaded: 0,
-        waiting: 0,
-        atStation: 0,
-      },
+      throughputWindowPerHour: this.throughputWindowPerHour(),
+      completionTimeMs: this.completionTimeSummary(),
+      utilisation: this.utilisationSummary(),
       jobsPending: this.pendingJobs(),
       rejectedAssignments: this.rejectedAssignments,
       deadlockEvents: this.deadlockEvents,
-      stations: this.world.stations.map((station) => ({
-        id: station.id,
-        busyFraction: 0,
-        avgQueueLength: 0,
-        maxQueueLength: 0,
-      })),
+      stations: this.stationSummary(),
     };
   }
 
@@ -619,10 +608,128 @@ export class Simulation {
       ordersCompleted: this.ordersCompleted,
       jobsCompleted: this.jobsCompleted,
       throughputPerHour: this.throughputPerHour(),
-      // Task 6 replaces the utilisation calculation.
-      utilisation: 0,
+      utilisation: this.utilisationSummary().overall,
       pendingJobs: this.pendingJobs(),
       avgQueueLength: this.avgQueueLength(),
+    });
+  }
+
+  /**
+   * R23: records robot state durations and station busy/queue metrics at the
+   * end of each tick, at tick granularity.
+   */
+  private recordTickMetrics(): void {
+    const now = this.world.simTimeMs;
+
+    for (const robot of this.world.robots) {
+      const previous = this.robotStatusSeen.get(robot.id);
+      if (previous === undefined) {
+        this.robotStatusSeen.set(robot.id, robot.status);
+        this.robotStatusSinceMs.set(robot.id, now);
+        continue;
+      }
+      if (previous === robot.status) continue;
+
+      const since = this.robotStatusSinceMs.get(robot.id) ?? now;
+      this.robotStateTimeMs[previous] += now - since;
+      this.robotStatusSeen.set(robot.id, robot.status);
+      this.robotStatusSinceMs.set(robot.id, now);
+    }
+
+    const tickMs = this.world.config.movement.tickMs;
+    this.stationTickCount += 1;
+    for (const station of this.world.stations) {
+      const state = this.stationMetrics.get(station.id) ?? {
+        busyTimeMs: 0,
+        queueLengthSum: 0,
+        maxQueueLength: 0,
+      };
+      this.stationMetrics.set(station.id, state);
+
+      if (station.serviceRemainingMs > 0) state.busyTimeMs += tickMs;
+      const queueLength = station.queue.length;
+      state.queueLengthSum += queueLength;
+      if (queueLength > state.maxQueueLength) state.maxQueueLength = queueLength;
+    }
+  }
+
+  private utilisationSummary(): MetricsSummary['utilisation'] {
+    const stateTimes: Record<RobotStatus, number> = { ...this.robotStateTimeMs };
+
+    // Include the open segment for each robot without mutating the totals.
+    for (const robot of this.world.robots) {
+      const status = this.robotStatusSeen.get(robot.id) ?? robot.status;
+      const since = this.robotStatusSinceMs.get(robot.id) ?? this.world.simTimeMs;
+      stateTimes[status] += this.world.simTimeMs - since;
+    }
+
+    const totalRobotTimeMs = this.world.simTimeMs * this.world.robots.length;
+    const share = (timeMs: number): number =>
+      totalRobotTimeMs > 0 ? timeMs / totalRobotTimeMs : 0;
+    const overall =
+      totalRobotTimeMs > 0
+        ? Math.min(1, Math.max(0, 1 - stateTimes.idle / totalRobotTimeMs))
+        : 0;
+
+    return {
+      overall,
+      idle: share(stateTimes.idle),
+      movingEmpty: share(stateTimes.moving_empty),
+      movingLoaded: share(stateTimes.moving_loaded),
+      waiting: share(stateTimes.waiting),
+      atStation: share(stateTimes.at_station),
+    };
+  }
+
+  private completionTimeSummary(): MetricsSummary['completionTimeMs'] {
+    const durations: number[] = [];
+    let max = 0;
+    let total = 0;
+    for (const order of this.world.orders.values()) {
+      if (order.completedAtMs === null) continue;
+      const duration = order.completedAtMs - order.createdAtMs;
+      durations.push(duration);
+      total += duration;
+      if (duration > max) max = duration;
+    }
+    if (durations.length === 0) {
+      return { mean: 0, p50: 0, p90: 0, p95: 0, p99: 0, max: 0 };
+    }
+    return {
+      mean: total / durations.length,
+      p50: percentile(durations, 50),
+      p90: percentile(durations, 90),
+      p95: percentile(durations, 95),
+      p99: percentile(durations, 99),
+      max,
+    };
+  }
+
+  /** Orders completed in the trailing simulated hour (bound exclusive). */
+  private throughputWindowPerHour(): number {
+    const windowStartMs = this.world.simTimeMs - 3_600_000;
+    let count = 0;
+    for (const order of this.world.orders.values()) {
+      if (order.completedAtMs !== null && order.completedAtMs > windowStartMs) count += 1;
+    }
+    return count;
+  }
+
+  private stationSummary(): MetricsSummary['stations'] {
+    return this.world.stations.map((station) => {
+      const state = this.stationMetrics.get(station.id) ?? {
+        busyTimeMs: 0,
+        queueLengthSum: 0,
+        maxQueueLength: 0,
+      };
+      return {
+        id: station.id,
+        busyFraction:
+          this.world.simTimeMs > 0 ? state.busyTimeMs / this.world.simTimeMs : 0,
+        avgQueueLength:
+          this.stationTickCount > 0 ? state.queueLengthSum / this.stationTickCount : 0,
+        maxQueueLength: state.maxQueueLength,
+      };
     });
   }
 
