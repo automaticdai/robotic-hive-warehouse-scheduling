@@ -149,7 +149,7 @@ test('a blocked component sidesteps a free member when the cycle victim is boxed
   const world = createWorld(
     parseConfig({
       grid: { width: 6, height: 5 },
-      robots: 6,
+      robots: 9,
       pods: { count: 1 },
       stations: [{ id: 'S-1', docks: [[5, 4]], queueCapacity: 2, serviceTimeMs: 1000 }],
       seed: 1,
@@ -191,6 +191,18 @@ test('a blocked component sidesteps a free member when the cycle victim is boxed
   r6.status = 'moving_empty';
   r6.assignedAtMs = 0;
 
+  // Idle robots wall off R1's remaining neighbours, so neither cycle member has
+  // a free cell and recovery must fall back to the whole component (R19).
+  for (const [robot, cell] of [
+    [world.robots[6], { x: 2, y: 1 }],
+    [world.robots[7], { x: 2, y: 3 }],
+    [world.robots[8], { x: 1, y: 2 }],
+  ] as const) {
+    robot.cell = cell;
+    robot.path = [];
+    robot.status = 'idle';
+  }
+
   const first = updateMovement(world);
 
   expect(first.blocks).toBe(6);
@@ -204,4 +216,46 @@ test('a blocked component sidesteps a free member when the cycle victim is boxed
 
   expect(r6.cell).toEqual({ x: 3, y: 3 });
   expect(second.blocks).toBeLessThan(first.blocks);
+});
+
+test('a cycle member sidesteps before a lower-priority peripheral blocker', () => {
+  const world = createWorld(
+    parseConfig({
+      grid: { width: 4, height: 4 },
+      robots: 3,
+      pods: { count: 1 },
+      stations: [{ id: 'S-1', docks: [[3, 3]], queueCapacity: 2, serviceTimeMs: 1000 }],
+      seed: 1,
+    }),
+  );
+  const [boxed, cycleMover, peripheral] = world.robots;
+
+  // R-0001 <-> R-0002 swap cycle. R-0001 is boxed in by the grid edge, the
+  // peripheral blocker and R-0002; R-0002 has a free east neighbour.
+  boxed.cell = { x: 0, y: 0 };
+  boxed.path = [{ x: 1, y: 0 }, { x: 1, y: 1 }];
+  boxed.status = 'moving_empty';
+  boxed.assignedAtMs = 0;
+
+  cycleMover.cell = { x: 1, y: 0 };
+  cycleMover.path = [{ x: 0, y: 0 }, { x: 0, y: 1 }];
+  cycleMover.status = 'moving_empty';
+  cycleMover.assignedAtMs = 0;
+
+  // The peripheral robot is blocked by R-0002, has a free neighbour of its own,
+  // and has lower priority than both cycle members.
+  peripheral.cell = { x: 0, y: 1 };
+  peripheral.path = [{ x: 1, y: 0 }, { x: 1, y: 1 }];
+  peripheral.status = 'moving_empty';
+  peripheral.assignedAtMs = 10;
+
+  const stats = updateMovement(world);
+
+  expect(stats.blocks).toBe(3);
+  expect(stats.moves).toBe(1);
+  expect(stats.replans).toBe(1);
+  expect(stats.deadlockEvents).toBe(1);
+  expect(cycleMover.cell).toEqual({ x: 2, y: 0 });
+  expect(peripheral.cell).toEqual({ x: 0, y: 1 });
+  expect(boxed.cell).toEqual({ x: 0, y: 0 });
 });

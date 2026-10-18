@@ -219,10 +219,10 @@ test('FCFS keeps completing jobs through persistent traffic', () => {
         { id: 'S-1', docks: [[5, 5], [5, 6]], queueCapacity: 8, serviceTimeMs: 20000 },
         { id: 'S-2', docks: [[14, 10], [14, 11]], queueCapacity: 8, serviceTimeMs: 20000 },
       ],
-      // Seed 4 reproduces the reported gridlock: cycle-only recovery stalls at
-      // 22 completed jobs from 90 s through 180 s. Seeds 1-3 do not stall with
-      // the current Task 5 orchestration.
-      seed: 4,
+      // Seed 5 freezes at 8 completed jobs with component-only recovery: the
+      // 2-cycle members stay put while a lower-priority peripheral blocker is
+      // sidestepped every tick.
+      seed: 5,
     }),
   );
   const allocator = new FcfsAllocator();

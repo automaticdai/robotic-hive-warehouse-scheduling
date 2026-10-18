@@ -325,6 +325,25 @@ function collectBlockedComponent(
 }
 
 /**
+ * Returns the lowest-priority eligible candidate with a free adjacent cell.
+ * Candidates must already be sorted by ascending priority.
+ */
+function findSidestepper(
+  candidates: readonly Robot[],
+  grid: GridConfig,
+  occupancy: ReadonlyMap<string, string>,
+): { robot: Robot; cell: Cell } | undefined {
+  for (let index = candidates.length - 1; index >= 0; index--) {
+    const robot = candidates[index]!;
+    if (robot.status === 'at_station' || robot.path.length === 0) continue;
+
+    const cell = findFreeNeighbour(robot.cell, grid, occupancy);
+    if (cell !== undefined) return { robot, cell };
+  }
+  return undefined;
+}
+
+/**
  * Resolves one tick of robot movement. Robots are processed in priority order
  * against a working occupancy built from robot cells (pods are never
  * obstacles), so a robot cannot enter a cell another robot already occupies.
@@ -383,6 +402,10 @@ export function updateMovement(world: World): MovementStats {
   }
 
   const cycles = detectWaitCycles(blockedBy);
+  const cycleMemberIds = new Set<string>();
+  for (const cycle of cycles) {
+    for (const id of cycle) cycleMemberIds.add(id);
+  }
 
   // Cycles are recovered per undirected blocked component: a cycle whose
   // designated victim is boxed in can still be broken by another blocked robot
@@ -419,24 +442,22 @@ export function updateMovement(world: World): MovementStats {
       .filter((robot): robot is Robot => robot !== undefined)
       .sort(comparePriority);
 
-    let sidestepper: Robot | undefined;
-    let sidestepCell: Cell | undefined;
-    for (let index = members.length - 1; index >= 0; index--) {
-      const member = members[index]!;
-      if (member.status === 'at_station' || member.path.length === 0) continue;
+    // R19: break the cycle itself first. A peripheral blocker that happens to
+    // be lower priority can otherwise be sidestepped forever while the cycle
+    // members stay put. Fall back to the whole component only when every cycle
+    // member is boxed in.
+    const cycleCandidates = members.filter((robot) => cycleMemberIds.has(robot.id));
+    const choice =
+      findSidestepper(cycleCandidates, grid, occupancy) ??
+      findSidestepper(members, grid, occupancy);
+    if (choice === undefined) continue;
 
-      const freeCell = findFreeNeighbour(member.cell, grid, occupancy);
-      if (freeCell !== undefined) {
-        sidestepper = member;
-        sidestepCell = freeCell;
-        break;
-      }
-    }
-    if (sidestepper === undefined || sidestepCell === undefined) continue;
+    const { robot: sidestepper, cell: sidestepCell } = choice;
 
     const goal = sidestepper.path[sidestepper.path.length - 1]!;
+    const vacatedKey = cellKey(sidestepper.cell);
 
-    occupancy.delete(cellKey(sidestepper.cell));
+    occupancy.delete(vacatedKey);
     sidestepper.cell = { x: sidestepCell.x, y: sidestepCell.y };
     occupancy.set(cellKey(sidestepper.cell), sidestepper.id);
     sidestepper.path = [];
@@ -445,11 +466,12 @@ export function updateMovement(world: World): MovementStats {
     stats.moves += 1;
     stats.deadlockEvents += 1;
 
-    sidestepper.path = findPath(
-      grid,
-      sidestepper.cell,
-      goal,
-      buildCongestionCost(world.robots, sidestepper.id),
+    // A sidestep exists to give up the vacated cell. Planning straight back
+    // into it would recreate the same wait cycle on the next tick, so it is
+    // treated as impassable for the recovery replan.
+    const congestionCost = buildCongestionCost(world.robots, sidestepper.id);
+    sidestepper.path = findPath(grid, sidestepper.cell, goal, (cell) =>
+      cellKey(cell) === vacatedKey ? Number.POSITIVE_INFINITY : congestionCost(cell),
     );
     stats.replans += 1;
   }
