@@ -259,3 +259,53 @@ test('a cycle member sidesteps before a lower-priority peripheral blocker', () =
   expect(peripheral.cell).toEqual({ x: 0, y: 1 });
   expect(boxed.cell).toEqual({ x: 0, y: 0 });
 });
+
+test('recovery replans without the vacated-cell exclusion when it would strand the robot', () => {
+  const world = createWorld(
+    parseConfig({
+      grid: { width: 1, height: 4 },
+      robots: 2,
+      pods: { count: 1 },
+      stations: [{ id: 'S-1', docks: [[0, 3]], queueCapacity: 2, serviceTimeMs: 1000 }],
+      seed: 1,
+    }),
+  );
+  const [first, second] = world.robots;
+
+  // A head-on swap in a one-cell-wide corridor. The lower-priority robot is
+  // sidestepped south to the dead end at (0, 3), so its only route back to the
+  // goal (0, 1) passes through the vacated cell (0, 2).
+  first.cell = { x: 0, y: 1 };
+  first.path = [{ x: 0, y: 2 }];
+  first.status = 'moving_empty';
+  first.assignedAtMs = 0;
+
+  second.cell = { x: 0, y: 2 };
+  second.path = [{ x: 0, y: 1 }];
+  second.status = 'moving_empty';
+  second.assignedAtMs = 10;
+
+  const goals = new Map([
+    [first.id, { x: 0, y: 2 }],
+    [second.id, { x: 0, y: 1 }],
+  ]);
+
+  const stats = updateMovement(world);
+
+  expect(stats.deadlockEvents).toBe(1);
+  expect(second.cell).toEqual({ x: 0, y: 3 });
+  // Without the fallback the exclusion-only replan returns [] and the robot is
+  // permanently skipped by findSidestepper and by allocation (not idle).
+  expect(second.path.length).toBeGreaterThan(0);
+  expect(second.path.at(-1)).toEqual({ x: 0, y: 1 });
+
+  for (let tick = 0; tick < 20; tick++) {
+    updateMovement(world);
+    for (const robot of world.robots) {
+      const goal = goals.get(robot.id)!;
+      const parkedAtGoal =
+        robot.path.length > 0 || (robot.cell.x === goal.x && robot.cell.y === goal.y);
+      expect(parkedAtGoal).toBe(true);
+    }
+  }
+});

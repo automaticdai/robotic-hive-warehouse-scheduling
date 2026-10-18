@@ -473,6 +473,17 @@ export function updateMovement(world: World): MovementStats {
     sidestepper.path = findPath(grid, sidestepper.cell, goal, (cell) =>
       cellKey(cell) === vacatedKey ? Number.POSITIVE_INFINITY : congestionCost(cell),
     );
+    // In a one-cell-wide corridor the goal may be reachable only through the
+    // vacated cell. Returning [] there would strand the robot permanently:
+    // recovery skips empty-path robots and allocation only accepts idle ones.
+    // Fall back to the unconstrained route whenever the robot is still off its
+    // remembered goal.
+    if (
+      sidestepper.path.length === 0 &&
+      (sidestepper.cell.x !== goal.x || sidestepper.cell.y !== goal.y)
+    ) {
+      sidestepper.path = findPath(grid, sidestepper.cell, goal, congestionCost);
+    }
     stats.replans += 1;
   }
 
