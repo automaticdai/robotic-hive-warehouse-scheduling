@@ -43,3 +43,7 @@ next-env.d.ts
 # local brainstorming and simulation artifacts
 .superpowers/
 results/
+
+# python
+__pycache__/
+.pytest_cache/
