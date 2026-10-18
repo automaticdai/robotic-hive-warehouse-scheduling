@@ -66,12 +66,14 @@ test('accepts only positive integer durations with ms/s/m/h suffixes', () => {
   expect(() => parseDuration('10')).toThrow();
 });
 
-test('python strategies point at Task 9 until the sidecar client exists', async () => {
+test('runs Python strategies through the sidecar', async () => {
   const outDir = await mkdtemp(path.join(tmpdir(), 'hive-python-'));
-  await expect(
-    runHeadless({
-      configPath: 'configs/smoke.json', strategy: 'python:auction',
-      untilMs: 1_000, seed: 42, outDir,
-    }),
-  ).rejects.toThrow(/Task 9/);
+  const summary = await runHeadless({
+    configPath: 'configs/smoke.json', strategy: 'python:auction',
+    untilMs: 1_000, seed: 42, outDir,
+  });
+  expect(summary.simDurationMs).toBe(1_000);
+  expect(summary.strategyDigest).toMatch(/^[0-9a-f]{64}$/);
+  const written = JSON.parse(await readFile(path.join(outDir, 'summary.json'), 'utf8'));
+  expect(written.strategy).toBe('python:auction');
 });
