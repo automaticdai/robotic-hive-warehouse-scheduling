@@ -159,6 +159,14 @@ const configSchema = rawConfigSchema
       });
     }
 
+    if (config.robots + config.pods.count > robotsLimit) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['pods', 'count'],
+        message: `robots (${config.robots}) + pods.count (${config.pods.count}) exceeds grid cell count (${robotsLimit})`,
+      });
+    }
+
     if (config.orders.linesPerOrder.min > config.orders.linesPerOrder.max) {
       ctx.addIssue({
         code: 'custom',

@@ -33,3 +33,14 @@ test('rejects more robots than grid cells', () => {
     }),
   ).toThrow(ConfigError);
 });
+
+test('rejects robots plus pods exceeding the grid cell count', () => {
+  expect(() =>
+    parseConfig({
+      grid: { width: 2, height: 2 },
+      robots: 3,
+      pods: { count: 2 },
+      stations: [{ id: 'S-1', docks: [[0, 0]], queueCapacity: 1, serviceTimeMs: 1000 }],
+    }),
+  ).toThrow(ConfigError);
+});

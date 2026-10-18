@@ -96,12 +96,16 @@ export class OrderGenerator {
     return created;
   }
 
-  /** Exponential interarrival in ms for the configured hourly rate. */
+  /**
+   * Exponential interarrival in ms for the configured hourly rate. Clamped to
+   * at least 1 ms so a zero sample can never leave the arrival cursor fixed
+   * (which would make `generateDueOrders` loop forever).
+   */
   private exponentialInterarrival(): number {
     const rate = this.config.arrivalRatePerHour;
     if (rate === 0) {
       return Number.POSITIVE_INFINITY;
     }
-    return -Math.log(1 - this.rng.next()) * (3_600_000 / rate);
+    return Math.max(1, -Math.log(1 - this.rng.next()) * (3_600_000 / rate));
   }
 }

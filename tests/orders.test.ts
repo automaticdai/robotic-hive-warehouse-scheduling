@@ -1,5 +1,6 @@
 import { parseConfig } from '@/sim/config';
 import { OrderGenerator } from '@/sim/orders';
+import type { Rng } from '@/sim/rng';
 import { createWorld } from '@/sim/world';
 
 const config = parseConfig({
@@ -39,4 +40,29 @@ test('a pod is never reserved by two live jobs', () => {
   generator.generateDueOrders();
   const reserved = [...world.jobs.values()].map((job) => job.podId);
   expect(new Set(reserved).size).toBe(reserved.length);
+});
+
+test('a zero interarrival sample is clamped so generation always advances', () => {
+  const world = createWorld(
+    parseConfig({
+      grid: { width: 3, height: 3 },
+      robots: 1,
+      pods: { count: 1 },
+      stations: [{ id: 'S-1', docks: [[0, 0]], queueCapacity: 1, serviceTimeMs: 1000 }],
+      orders: { arrivalRatePerHour: 3600, linesPerOrder: { min: 1, max: 1 } },
+      seed: 1,
+    }),
+  );
+  const zeroRng: Rng = {
+    next: () => 0,
+    int: () => 0,
+    pick: <T>(items: readonly T[]) => items[0]!,
+  };
+  const generator = new OrderGenerator(world, world.config.orders, zeroRng);
+
+  expect(generator.generateDueOrders()).toEqual([]);
+
+  world.simTimeMs = 1;
+  const orders = generator.generateDueOrders();
+  expect(orders).toHaveLength(1);
 });
