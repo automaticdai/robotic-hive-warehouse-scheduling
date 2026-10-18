@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { parseDuration, parseHeadlessArgs } from '@/headless/args';
@@ -76,4 +76,15 @@ test('runs Python strategies through the sidecar', async () => {
   expect(summary.strategyDigest).toMatch(/^[0-9a-f]{64}$/);
   const written = JSON.parse(await readFile(path.join(outDir, 'summary.json'), 'utf8'));
   expect(written.strategy).toBe('python:auction');
+});
+
+test('rejects traversal in Python strategy ids without writing output', async () => {
+  const outDir = await mkdtemp(path.join(tmpdir(), 'hive-invalid-'));
+  await expect(
+    runHeadless({
+      configPath: 'configs/smoke.json', strategy: 'python:../hive_sim/protocol',
+      untilMs: 1_000, seed: 42, outDir,
+    }),
+  ).rejects.toThrow(/Invalid Python strategy/);
+  expect(await readdir(outDir)).toEqual([]);
 });

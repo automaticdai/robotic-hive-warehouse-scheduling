@@ -53,6 +53,7 @@ export class PythonAllocator implements Allocator {
   private readonly timeoutMs: number;
   private strategy: string;
   private sessionId: string | null = null;
+  private sessionPromise: Promise<string> | null = null;
 
   constructor({ baseUrl, strategy, timeoutMs }: PythonAllocatorOptions) {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
@@ -83,8 +84,21 @@ export class PythonAllocator implements Allocator {
   }
 
   async dispose(): Promise<void> {
-    const sessionId = this.sessionId;
+    const pending = this.sessionPromise;
+    let sessionId = this.sessionId;
     this.sessionId = null;
+    this.sessionPromise = null;
+
+    if (sessionId === null && pending !== null) {
+      try {
+        sessionId = await pending;
+      } catch {
+        return;
+      }
+      // The creation handler may have stored the id after dispose cleared it.
+      this.sessionId = null;
+    }
+
     if (sessionId === null) return;
 
     try {
@@ -94,9 +108,30 @@ export class PythonAllocator implements Allocator {
     }
   }
 
-  private async ensureSession(): Promise<string> {
-    if (this.sessionId !== null) return this.sessionId;
+  /**
+   * Creates the sidecar session at most once. The in-flight promise is cached
+   * so concurrent `allocate`/`select` calls share one POST /sessions; it is
+   * cleared on rejection so a later call can retry.
+   */
+  private ensureSession(): Promise<string> {
+    if (this.sessionId !== null) return Promise.resolve(this.sessionId);
+    if (this.sessionPromise !== null) return this.sessionPromise;
 
+    this.sessionPromise = this.createSession().then(
+      (sessionId) => {
+        this.sessionId = sessionId;
+        this.sessionPromise = null;
+        return sessionId;
+      },
+      (error: unknown) => {
+        this.sessionPromise = null;
+        throw error;
+      },
+    );
+    return this.sessionPromise;
+  }
+
+  private async createSession(): Promise<string> {
     const payload = await this.request('/sessions', {
       method: 'POST',
       body: JSON.stringify({ strategy: this.strategy, config: {} }),
@@ -106,11 +141,10 @@ export class PythonAllocator implements Allocator {
       throw new AllocatorError('Python sidecar returned a malformed session response');
     }
 
-    this.sessionId = payload.sessionId;
     if (typeof payload.strategy === 'string' && payload.strategy !== '') {
       this.strategy = payload.strategy;
     }
-    return this.sessionId;
+    return payload.sessionId;
   }
 
   private async request(pathname: string, init: RequestInit): Promise<unknown> {

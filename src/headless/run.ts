@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { AllocatorError, createAllocator } from '../lib/allocator';
+import { AllocatorError, createAllocator, pythonModuleName } from '../lib/allocator';
 import { PythonAllocator } from '../lib/pythonAllocator';
 import { getSidecarInfo, startPythonSidecar, stopPythonSidecar } from '../server/pythonSidecar';
 import type { Allocator, Assignment } from '../sim/allocation';
@@ -33,13 +33,17 @@ async function computeStrategyDigest(strategy: string): Promise<string> {
   if (strategy === 'builtin:fcfs') return 'builtin';
   if (!strategy.startsWith('python:')) return 'unavailable';
 
-  const moduleName = strategy.slice('python:'.length);
-  if (moduleName === '') return 'unavailable';
+  // Reject traversal and malformed names before touching the file system.
+  const moduleName = pythonModuleName(strategy);
+  const strategiesDir = path.resolve(process.cwd(), 'python', 'strategies');
+  const filePath = path.resolve(strategiesDir, `${moduleName}.py`);
+
+  if (!filePath.startsWith(`${strategiesDir}${path.sep}`)) {
+    throw new AllocatorError(`Invalid Python strategy path: "${strategy}"`);
+  }
 
   try {
-    const source = await readFile(
-      path.join(process.cwd(), 'python', 'strategies', `${moduleName}.py`),
-    );
+    const source = await readFile(filePath);
     return createHash('sha256').update(source).digest('hex');
   } catch {
     return 'unavailable';
