@@ -274,10 +274,12 @@ export class Simulation {
     this.world.tick += 1;
 
     this.orderGenerator.generateDueOrders();
+    // Advance packing before service completion so an order whose final pod is
+    // serviced this tick starts its full packing duration at this timestamp.
+    this.advanceOrders();
     this.advanceStations();
     this.replenishPods();
     this.releaseDependentJobs();
-    this.advanceOrders();
     this.retryDeposits();
 
     const movement = updateMovement(this.world);
@@ -488,10 +490,15 @@ export class Simulation {
     for (const order of this.world.orders.values()) {
       if (order.completedAtMs !== null || order.packingRemainingMs === null) continue;
 
-      order.packingRemainingMs = Math.max(0, order.packingRemainingMs - tickMs);
-      if (order.packingRemainingMs === 0) {
-        order.completedAtMs = this.world.simTimeMs;
+      const remaining = order.packingRemainingMs - tickMs;
+      if (remaining <= 0) {
+        // A tick can overshoot the due time when packing is not a multiple of
+        // tickMs; record the exact due timestamp rather than the tick boundary.
+        order.completedAtMs = this.world.simTimeMs + remaining;
+        order.packingRemainingMs = 0;
         this.ordersCompleted += 1;
+      } else {
+        order.packingRemainingMs = remaining;
       }
     }
   }
@@ -566,7 +573,10 @@ export class Simulation {
         robot.path = findPath(this.world.config.grid, robot.cell, dock);
       }
 
-      if (robot.carrying && robot.path.length === 0) {
+      // Ruling R20: any dock of the assigned station accepts the pod, even if
+      // the robot was targeting a different (sibling) dock or still has path
+      // left. Docks of other stations never accept it.
+      if (robot.carrying) {
         const station = this.resolveStation(job, stationsById);
         if (station === undefined) continue;
         if (!station.docks.some((dock) => sameCell(dock, robot.cell))) continue;

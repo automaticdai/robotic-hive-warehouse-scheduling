@@ -209,6 +209,66 @@ test('observe throws while an allocation is pending', () => {
   expect(() => sim.observe()).toThrow();
 });
 
+test('a carrying robot deposits at any dock of its assigned station', () => {
+  const sim = makeSim();
+  const station = sim.world.stations[0];
+  station.docks = [{ x: 0, y: 5 }, { x: 0, y: 6 }];
+  const jobId = addJob(sim);
+  const job = sim.world.jobs.get(jobId)!;
+  job.stationId = 'S-1';
+  job.candidateStations = ['S-1'];
+
+  const robot = sim.world.robots[0];
+  robot.cell = { x: 0, y: 6 };
+  robot.jobId = jobId;
+  robot.carrying = true;
+  robot.status = 'moving_loaded';
+  robot.path = [{ x: 0, y: 5 }];
+
+  // Keep the path non-empty through the movement phase: the other dock is
+  // occupied, so the robot is blocked there while standing on a sibling dock.
+  sim.world.robots[1].cell = { x: 0, y: 5 };
+  sim.world.robots[1].status = 'idle';
+  sim.world.robots[1].path = [];
+
+  sim.tick();
+
+  expect(job.status).toBe('complete');
+  expect(robot.status).toBe('idle');
+  expect(robot.jobId).toBeNull();
+  expect(station.queue).toHaveLength(1);
+  expect(station.queue[0]!.podId).toBe('P-00001');
+});
+
+test('order completion preserves the full packing duration', () => {
+  const sim = new Simulation(
+    parseConfig({
+      grid: { width: 10, height: 10 },
+      robots: 1,
+      pods: { count: 5 },
+      stations: [{ id: 'S-1', docks: [[0, 5]], queueCapacity: 2, serviceTimeMs: 100 }],
+      orders: {
+        arrivalRatePerHour: 0,
+        linesPerOrder: { min: 1, max: 1 },
+        packingTimeMs: 500,
+      },
+      seed: 5,
+    }),
+  );
+  const station = sim.world.stations[0];
+  sim.world.orders.set('O-000001', {
+    id: 'O-000001', createdAtMs: 0, jobIds: ['J-0000001'], stationId: 'S-1',
+    podsTotal: 1, podsServiced: 0, packingRemainingMs: null, completedAtMs: null,
+  });
+  station.queue = [{ podId: 'P-00001', orderId: 'O-000001', jobId: 'J-0000001' }];
+  station.serviceRemainingMs = 100;
+
+  for (let i = 0; i < 6; i++) sim.tick();
+
+  expect(sim.timeMs).toBe(600);
+  expect(sim.world.orders.get('O-000001')!.completedAtMs).toBe(600);
+});
+
 test('FCFS keeps completing jobs through persistent traffic', () => {
   const sim = new Simulation(
     parseConfig({
