@@ -17,7 +17,17 @@ from .runner import DEFAULT_STRATEGIES_DIR, StrategySession, resolve_strategies_
 
 _ALLOWED_METHODS = "GET, POST, DELETE, OPTIONS"
 _ALLOWED_HEADERS = "Content-Type"
-_LOCAL_ORIGIN_PREFIXES = ("http://localhost", "http://127.0.0.1")
+_ALLOWED_ORIGIN_HOSTS = {"localhost", "127.0.0.1"}
+_SERIALIZATION_ERROR = "Failed to serialize strategy result"
+
+
+def _is_allowed_origin(origin: str) -> bool:
+    """Allow only plain-HTTP origins whose hostname is exactly loopback."""
+    try:
+        parts = urlsplit(origin)
+    except ValueError:
+        return False
+    return parts.scheme == "http" and parts.hostname in _ALLOWED_ORIGIN_HOSTS
 
 
 class _InvalidJson(Exception):
@@ -98,13 +108,17 @@ class SidecarRequestHandler(BaseHTTPRequestHandler):
             "Access-Control-Allow-Headers": _ALLOWED_HEADERS,
         }
         origin = self.headers.get("Origin")
-        if origin and origin.startswith(_LOCAL_ORIGIN_PREFIXES):
+        if origin and _is_allowed_origin(origin):
             headers["Access-Control-Allow-Origin"] = origin
             headers["Vary"] = "Origin"
         return headers
 
     def _send_json(self, status: int, payload: Any) -> None:
-        body = json.dumps(payload).encode("utf-8")
+        try:
+            body = json.dumps(payload, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError):
+            status = 500
+            body = json.dumps({"error": _SERIALIZATION_ERROR}).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))

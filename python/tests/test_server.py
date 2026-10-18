@@ -15,6 +15,13 @@ def start_test_server():
     return server, f"http://127.0.0.1:{server.server_address[1]}"
 
 
+def start_server_with(strategies_dir):
+    server = create_server(port=0, strategies_dir=strategies_dir)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
 def post(url, payload):
     request = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(request) as response:
@@ -178,5 +185,54 @@ def test_invalid_json_returns_400_with_cors():
         assert info.value.code == 400
         assert info.value.headers["Access-Control-Allow-Origin"] == "http://127.0.0.1:3000"
         assert "error" in json.loads(info.value.read())
+    finally:
+        server.shutdown()
+
+
+def test_cors_reflects_only_exact_loopback_hosts():
+    server, base = start_test_server()
+    try:
+        for origin in ("http://localhost:3000", "http://127.0.0.1:1234"):
+            request = urllib.request.Request(f"{base}/health", headers={"Origin": origin})
+            with urllib.request.urlopen(request) as response:
+                assert response.headers["Access-Control-Allow-Origin"] == origin
+
+        for origin in (
+            "http://localhost.evil.com",
+            "http://127.0.0.1.attacker.test",
+            "https://localhost",
+        ):
+            request = urllib.request.Request(f"{base}/health", headers={"Origin": origin})
+            with urllib.request.urlopen(request) as response:
+                assert response.headers.get("Access-Control-Allow-Origin") is None
+    finally:
+        server.shutdown()
+
+
+@pytest.mark.parametrize(
+    "name, expression",
+    [("set_diagnostics", "{1, 2}"), ("nan_diagnostics", "float('nan')")],
+)
+def test_unserializable_strategy_result_returns_500(tmp_path, name, expression):
+    (tmp_path / f"{name}.py").write_text(
+        "class Strategy:\n"
+        "    def __init__(self, config=None):\n"
+        "        pass\n"
+        "    def reset(self):\n"
+        "        pass\n"
+        "    def allocate(self, observation):\n"
+        f"        return {{'assignments': [], 'diagnostics': {{'value': {expression}}}}}\n"
+    )
+    server, base = start_server_with(str(tmp_path))
+    try:
+        created = post(f"{base}/sessions", {"strategy": name, "config": {}})
+        with pytest.raises(urllib.error.HTTPError) as info:
+            post(
+                f"{base}/sessions/{created['sessionId']}/allocate",
+                {"simTimeMs": 0, "allocationSeq": 1, "robots": [], "jobs": [], "stations": []},
+            )
+        assert info.value.code == 500
+        payload = json.loads(info.value.read())
+        assert payload == {"error": "Failed to serialize strategy result"}
     finally:
         server.shutdown()

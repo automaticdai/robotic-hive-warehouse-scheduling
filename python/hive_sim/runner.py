@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import threading
 import uuid
 from pathlib import Path
@@ -12,21 +13,25 @@ from .protocol import parse_assignments
 
 # ``server.py`` lives in ``python/hive_sim``; strategy files live next to it.
 DEFAULT_STRATEGIES_DIR = Path(__file__).resolve().parent.parent / "strategies"
+_DEFAULT_RELATIVE_NAME = "strategies"
 
 
 def resolve_strategies_dir(strategies_dir: str | Path) -> Path:
-    """Resolve a strategies directory, tolerating the brief's relative fixture path.
+    """Resolve a strategies directory against the current working directory.
 
-    The bundled tests ask for ``strategies`` as a relative path. When they run
-    from the repository root that path does not exist, so fall back to the
-    package-relative default rather than failing every test.
+    The bundled tests pass the literal relative path ``strategies``; when they
+    run from the repository root that directory does not exist, so only that
+    literal value falls back to the package-relative default. Any other missing
+    path (for example a misspelled ``--strategies-dir stratgies``) raises
+    ``FileNotFoundError`` instead of silently loading the bundled strategies.
     """
-    path = Path(strategies_dir)
+    raw = Path(strategies_dir)
+    path = raw if raw.is_absolute() else Path.cwd() / raw
     if path.is_dir():
         return path
-    if not path.is_absolute() and DEFAULT_STRATEGIES_DIR.is_dir():
+    if str(strategies_dir) == _DEFAULT_RELATIVE_NAME and DEFAULT_STRATEGIES_DIR.is_dir():
         return DEFAULT_STRATEGIES_DIR
-    return path
+    raise FileNotFoundError(f"Strategies directory not found: {strategies_dir}")
 
 
 class StrategySession:
@@ -63,7 +68,13 @@ class StrategySession:
         if spec is None or spec.loader is None:
             raise ValueError(f"Unable to load strategy: {name}")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # dataclasses (and other runtime introspection) look modules up here.
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(module_name, None)
+            raise
 
         strategy_class = getattr(module, "Strategy", None)
         if not callable(strategy_class):
