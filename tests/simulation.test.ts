@@ -1,4 +1,5 @@
 import { parseConfig } from '@/sim/config';
+import { FcfsAllocator } from '@/sim/fcfs';
 import { Simulation } from '@/sim/simulation';
 
 function makeSim() {
@@ -206,4 +207,36 @@ test('observe throws while an allocation is pending', () => {
   const sim = makeSim();
   sim.observe();
   expect(() => sim.observe()).toThrow();
+});
+
+test('FCFS keeps completing jobs through persistent traffic', () => {
+  const sim = new Simulation(
+    parseConfig({
+      grid: { width: 20, height: 20 },
+      robots: 8,
+      pods: { count: 100 },
+      stations: [
+        { id: 'S-1', docks: [[5, 5], [5, 6]], queueCapacity: 8, serviceTimeMs: 20000 },
+        { id: 'S-2', docks: [[14, 10], [14, 11]], queueCapacity: 8, serviceTimeMs: 20000 },
+      ],
+      // Seed 4 reproduces the reported gridlock: cycle-only recovery stalls at
+      // 22 completed jobs from 90 s through 180 s. Seeds 1-3 do not stall with
+      // the current Task 5 orchestration.
+      seed: 4,
+    }),
+  );
+  const allocator = new FcfsAllocator();
+
+  let jobsAt90s = 0;
+  for (let tick = 1; tick <= 1800; tick++) {
+    if (sim.isAllocationDue()) {
+      const observation = sim.observe();
+      sim.applyAllocation(observation.allocationSeq, allocator.allocate(observation));
+    }
+    sim.tick();
+    if (tick === 900) jobsAt90s = sim.getMetrics().jobsCompleted;
+  }
+
+  const jobsAt180s = sim.getMetrics().jobsCompleted;
+  expect(jobsAt180s).toBeGreaterThan(jobsAt90s);
 });

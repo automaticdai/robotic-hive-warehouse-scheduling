@@ -144,3 +144,64 @@ test('a wait cycle sidesteps the lowest-priority robot and preserves its goal', 
   expect(world.robots[1].path.at(-1)).toEqual({ x: 0, y: 1 });
   expect(world.robots[0].cell).toEqual({ x: 1, y: 1 });
 });
+
+test('a blocked component sidesteps a free member when the cycle victim is boxed in', () => {
+  const world = createWorld(
+    parseConfig({
+      grid: { width: 6, height: 5 },
+      robots: 6,
+      pods: { count: 1 },
+      stations: [{ id: 'S-1', docks: [[5, 4]], queueCapacity: 2, serviceTimeMs: 1000 }],
+      seed: 1,
+    }),
+  );
+  const [r1, r2, r3, r4, r5, r6] = world.robots;
+
+  // R1 <-> R2 wait cycle. R2 is the cycle's lowest-priority member and every
+  // neighbour of R2 is covered by another member of the blocked component.
+  r1.cell = { x: 2, y: 2 };
+  r1.path = [{ x: 3, y: 2 }, { x: 3, y: 1 }];
+  r1.status = 'moving_empty';
+  r1.assignedAtMs = 0;
+
+  r2.cell = { x: 3, y: 2 };
+  r2.path = [{ x: 2, y: 2 }, { x: 2, y: 1 }];
+  r2.status = 'moving_empty';
+  r2.assignedAtMs = 0;
+
+  r3.cell = { x: 3, y: 1 };
+  r3.path = [{ x: 3, y: 2 }, { x: 4, y: 2 }];
+  r3.status = 'moving_empty';
+  r3.assignedAtMs = 0;
+
+  r4.cell = { x: 4, y: 2 };
+  r4.path = [{ x: 3, y: 2 }, { x: 3, y: 3 }];
+  r4.status = 'moving_empty';
+  r4.assignedAtMs = 0;
+
+  // R5 is the component's lowest-priority member and has a free east neighbour.
+  r5.cell = { x: 3, y: 3 };
+  r5.path = [{ x: 3, y: 2 }, { x: 3, y: 1 }, { x: 4, y: 1 }];
+  r5.status = 'moving_empty';
+  r5.assignedAtMs = 10;
+
+  // R6 is blocked by R5, so R5's sidestep frees R6's next cell.
+  r6.cell = { x: 3, y: 4 };
+  r6.path = [{ x: 3, y: 3 }, { x: 2, y: 3 }];
+  r6.status = 'moving_empty';
+  r6.assignedAtMs = 0;
+
+  const first = updateMovement(world);
+
+  expect(first.blocks).toBe(6);
+  expect(first.moves).toBe(1);
+  expect(first.replans).toBe(1);
+  expect(first.deadlockEvents).toBe(1);
+  expect(r5.cell).toEqual({ x: 4, y: 3 });
+  expect(r5.path.at(-1)).toEqual({ x: 4, y: 1 });
+
+  const second = updateMovement(world);
+
+  expect(r6.cell).toEqual({ x: 3, y: 3 });
+  expect(second.blocks).toBeLessThan(first.blocks);
+});

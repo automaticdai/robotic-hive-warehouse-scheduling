@@ -283,6 +283,47 @@ function replanToGoal(world: World, robot: Robot, stats: MovementStats): void {
   stats.replans += 1;
 }
 
+/** Returns the first N/E/S/W neighbour that is in bounds and unoccupied. */
+function findFreeNeighbour(
+  cell: Cell,
+  grid: GridConfig,
+  occupancy: ReadonlyMap<string, string>,
+): Cell | undefined {
+  for (const [dx, dy] of NEIGHBOUR_OFFSETS) {
+    const candidate = { x: cell.x + dx, y: cell.y + dy };
+    if (isInBounds(candidate, grid) && !occupancy.has(cellKey(candidate))) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Collects the undirected connected component of the blockedBy graph reachable
+ * from `start`, so overlapping waits are treated as one blockage.
+ */
+function collectBlockedComponent(
+  start: string,
+  adjacency: ReadonlyMap<string, ReadonlySet<string>>,
+): Set<string> {
+  const component = new Set<string>([start]);
+  const pending = [start];
+
+  while (pending.length > 0) {
+    const id = pending.pop()!;
+    const neighbours = adjacency.get(id);
+    if (neighbours === undefined) continue;
+
+    for (const neighbour of neighbours) {
+      if (component.has(neighbour)) continue;
+      component.add(neighbour);
+      pending.push(neighbour);
+    }
+  }
+
+  return component;
+}
+
 /**
  * Resolves one tick of robot movement. Robots are processed in priority order
  * against a working occupancy built from robot cells (pods are never
@@ -341,27 +382,59 @@ export function updateMovement(world: World): MovementStats {
     }
   }
 
-  for (const cycle of detectWaitCycles(blockedBy)) {
-    const members = cycle
+  const cycles = detectWaitCycles(blockedBy);
+
+  // Cycles are recovered per undirected blocked component: a cycle whose
+  // designated victim is boxed in can still be broken by another blocked robot
+  // (typically a blocker or a robot queued behind one) that has a free cell.
+  const adjacency = new Map<string, Set<string>>();
+  const connect = (a: string, b: string): void => {
+    let aEdges = adjacency.get(a);
+    if (aEdges === undefined) {
+      aEdges = new Set();
+      adjacency.set(a, aEdges);
+    }
+    aEdges.add(b);
+
+    let bEdges = adjacency.get(b);
+    if (bEdges === undefined) {
+      bEdges = new Set();
+      adjacency.set(b, bEdges);
+    }
+    bEdges.add(a);
+  };
+  for (const [robotId, blockerId] of blockedBy) connect(robotId, blockerId);
+
+  const resolvedComponents = new Set<string>();
+
+  for (const cycle of cycles) {
+    const anchor = cycle[0]!;
+    if (resolvedComponents.has(anchor)) continue;
+
+    const component = collectBlockedComponent(anchor, adjacency);
+    for (const id of component) resolvedComponents.add(id);
+
+    const members = [...component]
       .map((id) => robotsById.get(id))
-      .filter((robot): robot is Robot => robot !== undefined);
-    if (members.length === 0) continue;
+      .filter((robot): robot is Robot => robot !== undefined)
+      .sort(comparePriority);
 
-    members.sort(comparePriority);
-    const sidestepper = members[members.length - 1]!;
-    if (sidestepper.path.length === 0) continue;
-
-    const goal = sidestepper.path[sidestepper.path.length - 1]!;
-
+    let sidestepper: Robot | undefined;
     let sidestepCell: Cell | undefined;
-    for (const [dx, dy] of NEIGHBOUR_OFFSETS) {
-      const candidate = { x: sidestepper.cell.x + dx, y: sidestepper.cell.y + dy };
-      if (isInBounds(candidate, grid) && !occupancy.has(cellKey(candidate))) {
-        sidestepCell = candidate;
+    for (let index = members.length - 1; index >= 0; index--) {
+      const member = members[index]!;
+      if (member.status === 'at_station' || member.path.length === 0) continue;
+
+      const freeCell = findFreeNeighbour(member.cell, grid, occupancy);
+      if (freeCell !== undefined) {
+        sidestepper = member;
+        sidestepCell = freeCell;
         break;
       }
     }
-    if (sidestepCell === undefined) continue;
+    if (sidestepper === undefined || sidestepCell === undefined) continue;
+
+    const goal = sidestepper.path[sidestepper.path.length - 1]!;
 
     occupancy.delete(cellKey(sidestepper.cell));
     sidestepper.cell = { x: sidestepCell.x, y: sidestepCell.y };
