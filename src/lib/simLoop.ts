@@ -62,6 +62,8 @@ export class SimLoop {
 
   start(): void {
     this.isRunning = true;
+    // Resuming after a pause must not replay the paused wall-clock interval.
+    this.lastNowMs = this.now();
     if (this.timer !== null) return;
     this.timer = setInterval(() => {
       void this.advanceTo(this.now());

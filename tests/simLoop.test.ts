@@ -53,3 +53,27 @@ test('pauses at an allocation boundary until the allocator resolves', async () =
   await pending;
   expect(sim.timeMs).toBe(1000);
 });
+
+test('resuming after a pause does not replay the paused wall time', async () => {
+  vi.useFakeTimers();
+  try {
+    const sim = new Simulation(parseConfig(baseConfig));
+    const loop = new SimLoop({
+      sim,
+      allocator: new FcfsAllocator(),
+      tickMs: 100,
+      now: () => Date.now(),
+    });
+
+    loop.start();
+    loop.pause();
+    vi.advanceTimersByTime(10_000);
+    loop.start();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(sim.timeMs).toBe(100);
+    loop.pause();
+  } finally {
+    vi.useRealTimers();
+  }
+});

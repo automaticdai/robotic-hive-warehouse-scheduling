@@ -142,17 +142,29 @@ function startTimers(): void {
   }
 }
 
-function createLoop(config: SimConfig, nextAllocator: Allocator): SimLoop {
-  const nextSim = new Simulation(config);
+function createLoop(nextSim: Simulation, nextAllocator: Allocator): SimLoop {
   const nextLoop = new SimLoop({
     sim: nextSim,
     allocator: nextAllocator,
-    tickMs: config.movement.tickMs,
+    tickMs: nextSim.world.config.movement.tickMs,
     onSnapshot: handleSnapshot,
     snapshotIntervalMs: SNAPSHOT_INTERVAL_MS,
   });
   sim = nextSim;
   return nextLoop;
+}
+
+/**
+ * Placeholder used when strategy construction fails during init. It always
+ * throws so SimLoop applies the configured `allocation.onFailure` policy while
+ * the worker stays alive and reports the error through status events.
+ */
+function createUnavailableAllocator(message: string): Allocator {
+  return {
+    allocate(): never {
+      throw new Error(message);
+    },
+  };
 }
 
 function init(config: SimConfig, options: InitOptions): void {
@@ -162,14 +174,24 @@ function init(config: SimConfig, options: InitOptions): void {
   strategy = options.strategy;
   pythonUrl = options.pythonUrl;
   inspectionTarget = null;
+  error = null;
 
-  const nextAllocator = createAllocator(strategy, {
-    pythonUrl,
-    timeoutMs: config.allocation.timeoutMs,
-  });
+  // Build the simulation before the allocator: if strategy construction fails
+  // the worker still reports metrics and readiness instead of going silent.
+  const nextSim = new Simulation(config);
+  let nextAllocator: Allocator;
+  try {
+    nextAllocator = createAllocator(strategy, {
+      pythonUrl,
+      timeoutMs: config.allocation.timeoutMs,
+    });
+  } catch (caught) {
+    error = errorMessage(caught);
+    nextAllocator = createUnavailableAllocator(error);
+  }
   allocator = nextAllocator;
 
-  loop = createLoop(config, nextAllocator);
+  loop = createLoop(nextSim, nextAllocator);
   loop.setSpeed(options.speed);
   // A fresh worker starts paused; the client explicitly calls play().
   startTimers();
@@ -207,13 +229,14 @@ function restart(config: SimConfig): void {
   loop.pause();
   disposeAllocator();
 
+  const nextSim = new Simulation(config);
   const nextAllocator = createAllocator(strategy, {
     pythonUrl,
     timeoutMs: config.allocation.timeoutMs,
   });
   allocator = nextAllocator;
 
-  loop = createLoop(config, nextAllocator);
+  loop = createLoop(nextSim, nextAllocator);
   loop.setSpeed(speed);
   if (wasRunning) loop.start();
 
