@@ -59,7 +59,9 @@ export default function Page() {
           strategies: data.strategies,
           strategy: data.defaultConfig.allocation.strategy,
           scenarios,
-          scenarioName: scenarios[0]?.name ?? 'default',
+          // The initial run uses `defaultConfig`, so the label starts at
+          // 'default' even when named scenarios exist.
+          scenarioName: 'default',
           pythonOnline: data.sidecar.online,
           error: null,
         });
@@ -112,6 +114,9 @@ export default function Page() {
       restart: (nextConfig) => {
         source.clear();
         client?.restart(nextConfig);
+        // The worker clears its inspection target on restart without echoing
+        // a clear, so reset the client-side selection/inspection explicitly.
+        useHudStore.getState().setSelected(null);
         setConfig(nextConfig);
       },
     }),

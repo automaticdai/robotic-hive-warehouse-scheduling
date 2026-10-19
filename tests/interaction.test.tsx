@@ -104,6 +104,20 @@ test('changing the scenario restarts with the named config', () => {
   expect(state.getState().scenarioName).toBe('rush');
 });
 
+test('renders a scenario option for the current name when it is not loaded', () => {
+  const client = {} as any;
+  const state = createHudStore({
+    running: true, speed: 1, simTimeMs: 0, metrics: null,
+    strategies: ['builtin:fcfs'], strategy: 'builtin:fcfs',
+    scenarioName: 'default', scenarios: [{ name: 'smoke', config: {} as any }],
+    pythonOnline: false, selected: null, inspection: null, error: null,
+  });
+  render(<Hud client={client} state={state} />);
+  const select = screen.getByLabelText(/scenario/i);
+  expect(select).toHaveValue('default');
+  expect(screen.getByRole('option', { name: 'default' })).toBeInTheDocument();
+});
+
 test('renders the Python status badge from the store', () => {
   const client = {} as any;
   const base = {

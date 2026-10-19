@@ -26,6 +26,9 @@ export function TransportDock({ client, state }: TransportDockProps) {
   const strategy = useStore(state, (s) => s.strategy);
   const scenarios = useStore(state, (s) => s.scenarios);
   const scenarioName = useStore(state, (s) => s.scenarioName);
+  // The initial name may not correspond to a loaded scenario (for example
+  // 'default'); keep a matching option so the select never has a bare value.
+  const hasScenarioOption = scenarios.some((scenario) => scenario.name === scenarioName);
 
   return (
     <div className="hud-panel hud-dock">
@@ -85,15 +88,14 @@ export function TransportDock({ client, state }: TransportDockProps) {
             state.getState().setScenario(next);
           }}
         >
-          {scenarios.length === 0 ? (
+          {hasScenarioOption ? null : (
             <option value={scenarioName}>{scenarioName || 'default'}</option>
-          ) : (
-            scenarios.map((scenario) => (
-              <option key={scenario.name} value={scenario.name}>
-                {scenario.name}
-              </option>
-            ))
           )}
+          {scenarios.map((scenario) => (
+            <option key={scenario.name} value={scenario.name}>
+              {scenario.name}
+            </option>
+          ))}
         </select>
       </label>
       <ul className="hud-legend" aria-label="Robot state legend">
