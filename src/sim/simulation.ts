@@ -44,6 +44,14 @@ export interface Snapshot {
 /** Sim-time spacing between time-series samples. */
 const SAMPLE_INTERVAL_MS = 1_000;
 
+/** Stepping order used when a deposited robot leaves its dock cell. */
+const EGRESS_OFFSETS: ReadonlyArray<readonly [number, number]> = [
+  [0, -1],
+  [1, 0],
+  [0, 1],
+  [-1, 0],
+];
+
 /** Numeric robot-state encoding used by snapshot consumers. */
 const ROBOT_STATE_CODE: Record<RobotStatus, number> = {
   idle: 0,
@@ -98,6 +106,7 @@ export class Simulation {
   private jobsCompleted = 0;
   private rejectedAssignments = 0;
   private deadlockEvents = 0;
+  private parkingSeq = 0;
 
   private readonly robotStateTimeMs: Record<RobotStatus, number> = {
     idle: 0,
@@ -596,8 +605,88 @@ export class Simulation {
     robot.path = [];
     robot.blockedTicks = 0;
 
+    // Leave the dock immediately. Idle robots left standing on dock cells are
+    // never moved by allocation in time and eventually wall off the station:
+    // with only a few docks per station, two parked robots plus the arriving
+    // queue are enough to box them in permanently. Stepping off keeps the dock
+    // available for the next loaded robot.
+    this.stepOffDock(robot);
+    // With ~1,600 orders/h the station approaches would otherwise accumulate
+    // one parked robot per serviced trip until every neighbouring cell is
+    // occupied. Give the serviced robot a deterministic route away from the
+    // dock apron so it rejoins the idle pool elsewhere.
+    this.assignParkingRoute(robot);
+
     if (wasEmpty) station.serviceRemainingMs = station.serviceTimeMs;
     return true;
+  }
+
+  /** Moves a just-serviced robot to the first free N/E/S/W neighbour, if any. */
+  private stepOffDock(robot: Robot): void {
+    const occupied = this.robotOccupancy(robot);
+
+    const { width, height } = this.world.config.grid;
+    for (const [dx, dy] of EGRESS_OFFSETS) {
+      const cell = { x: robot.cell.x + dx, y: robot.cell.y + dy };
+      if (cell.x < 0 || cell.x >= width || cell.y < 0 || cell.y >= height) continue;
+      if (occupied.has(cellKey(cell))) continue;
+      robot.cell = cell;
+      return;
+    }
+  }
+
+  /**
+   * Sends a serviced, unassigned robot to a free cell outside the dock apron.
+   * The route is planned with Manhattan A*, so the robot may pass through
+   * occupied cells in the plan; the movement tick blocks it and replans until
+   * the route is executed. Robots keep the `moving_empty` status while
+   * repositioning, so allocation only reuses them once they have parked.
+   */
+  private assignParkingRoute(robot: Robot): void {
+    const { width, height } = this.world.config.grid;
+    const occupied = this.robotOccupancy(robot);
+    const apron = Math.max(2, Math.floor(Math.min(width, height) / 8));
+    const docks = this.world.stations.flatMap((station) => station.docks);
+
+    const preferred: Cell[] = [];
+    const fallback: Cell[] = [];
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const cell = { x, y };
+        if (occupied.has(cellKey(cell))) continue;
+
+        let nearDock = false;
+        for (const dock of docks) {
+          if (manhattan(cell, dock) <= apron) {
+            nearDock = true;
+            break;
+          }
+        }
+        if (nearDock) fallback.push(cell);
+        else preferred.push(cell);
+      }
+    }
+
+    const pool = preferred.length > 0 ? preferred : fallback;
+    if (pool.length === 0) return;
+
+    const target = pool[this.parkingSeq % pool.length]!;
+    this.parkingSeq += 1;
+    const path = findPath(this.world.config.grid, robot.cell, target);
+    if (path.length === 0) return;
+
+    robot.path = path;
+    robot.status = 'moving_empty';
+    robot.blockedTicks = 0;
+  }
+
+  /** Cells occupied by robots other than `self`. */
+  private robotOccupancy(self: Robot): Set<string> {
+    const occupied = new Set<string>();
+    for (const robot of this.world.robots) {
+      if (robot !== self) occupied.add(cellKey(robot.cell));
+    }
+    return occupied;
   }
 
   private sampleIfDue(): void {

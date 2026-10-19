@@ -125,7 +125,10 @@ test('robot waits at a full dock, then deposits when a slot frees', () => {
   sim.tick();
   expect(robot.status).toBe('at_station');
   for (let i = 0; i < 10; i++) sim.tick();
-  expect(robot.status).toBe('idle');
+  // After depositing, the robot leaves the dock on a deterministic parking
+  // route (status moving_empty) instead of idling on the dock cell forever.
+  expect(['idle', 'moving_empty']).toContain(robot.status);
+  expect(robot.jobId).toBeNull();
   expect(sim.world.jobs.get(jobId)!.status).toBe('complete');
   expect(station.queue).toHaveLength(1);
 });
@@ -234,7 +237,9 @@ test('a carrying robot deposits at any dock of its assigned station', () => {
   sim.tick();
 
   expect(job.status).toBe('complete');
-  expect(robot.status).toBe('idle');
+  // The serviced robot is unassigned and may already be moving to a parking
+  // cell; either way it no longer blocks the dock.
+  expect(['idle', 'moving_empty']).toContain(robot.status);
   expect(robot.jobId).toBeNull();
   expect(station.queue).toHaveLength(1);
   expect(station.queue[0]!.podId).toBe('P-00001');

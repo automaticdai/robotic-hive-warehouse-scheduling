@@ -95,9 +95,11 @@ test('a robot replans after ten consecutive blocked ticks', () => {
   world.robots[0].cell = { x: 0, y: 0 };
   world.robots[0].path = [{ x: 1, y: 0 }, { x: 2, y: 0 }];
   world.robots[0].status = 'moving_empty';
+  // An at-station robot is never pushed aside, so the blocker stays put and
+  // the mover must replan (an idle blocker would now yield instead).
   world.robots[1].cell = { x: 1, y: 0 };
   world.robots[1].path = [];
-  world.robots[1].status = 'idle';
+  world.robots[1].status = 'at_station';
 
   for (let tick = 1; tick <= 9; tick++) {
     const stats = updateMovement(world);
@@ -260,6 +262,141 @@ test('a cycle member sidesteps before a lower-priority peripheral blocker', () =
   expect(boxed.cell).toEqual({ x: 0, y: 0 });
 });
 
+function movementWorld(robotCount: number, width = 5, height = 3) {
+  return createWorld(
+    parseConfig({
+      grid: { width, height },
+      robots: robotCount,
+      pods: { count: 1 },
+      stations: [{ id: 'S-1', docks: [[width - 1, height - 1]], queueCapacity: 2, serviceTimeMs: 1000 }],
+      seed: 1,
+    }),
+  );
+}
+
+test('a moving robot pushes a parked idle blocker aside and advances', () => {
+  const setup = (world: ReturnType<typeof movementWorld>): void => {
+    const [mover, idle] = world.robots;
+    mover.cell = { x: 1, y: 1 };
+    mover.path = [{ x: 2, y: 1 }];
+    mover.status = 'moving_empty';
+    mover.jobId = 'J-0000001';
+    mover.assignedAtMs = 0;
+
+    idle.cell = { x: 2, y: 1 };
+    idle.path = [];
+    idle.status = 'idle';
+    idle.jobId = null;
+    idle.carrying = false;
+  };
+
+  const world = movementWorld(2);
+  setup(world);
+  const stats = updateMovement(world);
+
+  expect(stats.blocks).toBe(0);
+  expect(stats.moves).toBe(2);
+  // Deterministic N/E/S/W order picks the north neighbour for the idle robot.
+  expect(world.robots[1]!.cell).toEqual({ x: 2, y: 0 });
+  expect(world.robots[0]!.cell).toEqual({ x: 2, y: 1 });
+  // The yielded robot remains idle and unassigned.
+  expect(world.robots[1]!.status).toBe('idle');
+  expect(world.robots[1]!.jobId).toBeNull();
+  expect(world.robots[1]!.path).toEqual([]);
+
+  const repeat = movementWorld(2);
+  setup(repeat);
+  updateMovement(repeat);
+  expect(repeat.robots.map((robot) => [robot.cell, robot.status])).toEqual(
+    world.robots.map((robot) => [robot.cell, robot.status]),
+  );
+});
+
+test('a boxed-in idle robot is not moved and the mover waits', () => {
+  const world = movementWorld(5, 3, 3);
+  const [mover, idle, north, east, south] = world.robots;
+
+  mover.cell = { x: 0, y: 1 };
+  mover.path = [{ x: 1, y: 1 }];
+  mover.status = 'moving_empty';
+  mover.jobId = 'J-0000001';
+
+  idle.cell = { x: 1, y: 1 };
+  idle.path = [];
+  idle.status = 'idle';
+  idle.jobId = null;
+
+  // Every neighbour of the idle robot except the mover's own cell is occupied.
+  for (const [robot, cell] of [
+    [north!, { x: 1, y: 0 }],
+    [east!, { x: 2, y: 1 }],
+    [south!, { x: 1, y: 2 }],
+  ] as const) {
+    robot.cell = cell;
+    robot.path = [];
+    robot.status = 'at_station';
+    robot.jobId = null;
+  }
+
+  const stats = updateMovement(world);
+
+  expect(stats.moves).toBe(0);
+  expect(stats.blocks).toBe(1);
+  expect(idle.cell).toEqual({ x: 1, y: 1 });
+  expect(idle.status).toBe('idle');
+  expect(mover.cell).toEqual({ x: 0, y: 1 });
+});
+
+test('at_station, carrying, and assigned robots are never pushed aside', () => {
+  const scenarios: Array<{ name: string; configure: (robot: ReturnType<typeof movementWorld>['robots'][number]) => void }> = [
+    {
+      name: 'at_station',
+      configure: (robot) => {
+        robot.status = 'at_station';
+        robot.jobId = null;
+        robot.path = [];
+      },
+    },
+    {
+      name: 'carrying',
+      configure: (robot) => {
+        robot.status = 'moving_loaded';
+        robot.carrying = true;
+        robot.jobId = 'J-0000002';
+        robot.path = [];
+      },
+    },
+    {
+      name: 'assigned',
+      configure: (robot) => {
+        robot.status = 'idle';
+        robot.jobId = 'J-0000002';
+        robot.path = [];
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const world = movementWorld(2);
+    const [mover, blocker] = world.robots;
+    mover.cell = { x: 0, y: 0 };
+    mover.path = [{ x: 1, y: 0 }];
+    mover.status = 'moving_empty';
+    mover.jobId = 'J-0000001';
+
+    blocker.cell = { x: 1, y: 0 };
+    blocker.carrying = false;
+    scenario.configure(blocker);
+
+    const stats = updateMovement(world);
+
+    expect(stats.moves, scenario.name).toBe(0);
+    expect(stats.blocks, scenario.name).toBe(1);
+    expect(blocker.cell, scenario.name).toEqual({ x: 1, y: 0 });
+    expect(mover.cell, scenario.name).toEqual({ x: 0, y: 0 });
+  }
+});
+
 test('recovery replans without the vacated-cell exclusion when it would strand the robot', () => {
   const world = createWorld(
     parseConfig({
@@ -278,11 +415,13 @@ test('recovery replans without the vacated-cell exclusion when it would strand t
   first.cell = { x: 0, y: 1 };
   first.path = [{ x: 0, y: 2 }];
   first.status = 'moving_empty';
+  first.jobId = 'J-0000001';
   first.assignedAtMs = 0;
 
   second.cell = { x: 0, y: 2 };
   second.path = [{ x: 0, y: 1 }];
   second.status = 'moving_empty';
+  second.jobId = 'J-0000002';
   second.assignedAtMs = 10;
 
   const goals = new Map([

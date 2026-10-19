@@ -155,7 +155,14 @@ test('rolling throughput counts only completions within the last hour', () => {
 
 test('utilisation accumulates robot state time at tick granularity', () => {
   const sim = makeMetricsSim({}, 2);
-  sim.world.robots[0]!.status = 'moving_empty';
+  // An unassigned robot with an empty path is parked and returns to idle at
+  // the end of the movement phase, so keep this one assigned to hold the
+  // moving_empty state across all ten ticks.
+  const robot = sim.world.robots[0]!;
+  robot.cell = { x: 0, y: 0 };
+  robot.path = [{ x: 1, y: 0 }];
+  robot.jobId = 'J-manual';
+  robot.status = 'moving_empty';
 
   for (let i = 0; i < 10; i++) sim.tick();
 

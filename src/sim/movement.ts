@@ -226,6 +226,20 @@ function isCarrying(robot: Robot): boolean {
 }
 
 /**
+ * A robot is yieldable only when it is parked: idle, unassigned, not carrying,
+ * and without a path. All other robots (at a station, carrying a pod, assigned
+ * to a job, or mid-route) are never pushed aside.
+ */
+function isIdleBlocker(robot: Robot): boolean {
+  return (
+    robot.status === 'idle' &&
+    robot.jobId === null &&
+    !robot.carrying &&
+    robot.path.length === 0
+  );
+}
+
+/**
  * Priority order: carrying robots first, then the older assignment, then the
  * lexicographically smaller id. Sorting ascending puts the highest priority
  * first, so the last element of a sorted group is the lowest priority.
@@ -283,19 +297,46 @@ function replanToGoal(world: World, robot: Robot, stats: MovementStats): void {
   stats.replans += 1;
 }
 
-/** Returns the first N/E/S/W neighbour that is in bounds and unoccupied. */
+/**
+ * Returns the first N/E/S/W neighbour that is in bounds and unoccupied, in the
+ * fixed deterministic order. `excluded` (the advance robot's current cell) is
+ * never returned.
+ */
 function findFreeNeighbour(
   cell: Cell,
   grid: GridConfig,
   occupancy: ReadonlyMap<string, string>,
+  excluded?: Cell,
 ): Cell | undefined {
   for (const [dx, dy] of NEIGHBOUR_OFFSETS) {
     const candidate = { x: cell.x + dx, y: cell.y + dy };
-    if (isInBounds(candidate, grid) && !occupancy.has(cellKey(candidate))) {
-      return candidate;
+    if (!isInBounds(candidate, grid)) continue;
+    if (excluded !== undefined && candidate.x === excluded.x && candidate.y === excluded.y) {
+      continue;
     }
+    if (!occupancy.has(cellKey(candidate))) return candidate;
   }
   return undefined;
+}
+
+/**
+ * Moves a parked idle robot one cell out of the way of a robot that wants to
+ * enter its cell. The idle robot stays idle and unassigned. Returns false when
+ * every neighbour is occupied, in which case the mover remains blocked.
+ */
+function yieldIdleBlocker(
+  blocker: Robot,
+  moverCell: Cell,
+  grid: GridConfig,
+  occupancy: Map<string, string>,
+): boolean {
+  const target = findFreeNeighbour(blocker.cell, grid, occupancy, moverCell);
+  if (target === undefined) return false;
+
+  occupancy.delete(cellKey(blocker.cell));
+  blocker.cell = { x: target.x, y: target.y };
+  occupancy.set(cellKey(blocker.cell), blocker.id);
+  return true;
 }
 
 /**
@@ -326,7 +367,9 @@ function collectBlockedComponent(
 
 /**
  * Returns the lowest-priority eligible candidate with a free adjacent cell.
- * Candidates must already be sorted by ascending priority.
+ * Candidates must already be sorted by ascending priority. Parked idle robots
+ * are eligible (they can be nudged aside during recovery); robots at a station
+ * and non-idle robots without a path are not.
  */
 function findSidestepper(
   candidates: readonly Robot[],
@@ -335,7 +378,8 @@ function findSidestepper(
 ): { robot: Robot; cell: Cell } | undefined {
   for (let index = candidates.length - 1; index >= 0; index--) {
     const robot = candidates[index]!;
-    if (robot.status === 'at_station' || robot.path.length === 0) continue;
+    if (robot.status === 'at_station') continue;
+    if (!isIdleBlocker(robot) && robot.path.length === 0) continue;
 
     const cell = findFreeNeighbour(robot.cell, grid, occupancy);
     if (cell !== undefined) return { robot, cell };
@@ -348,7 +392,9 @@ function findSidestepper(
  * against a working occupancy built from robot cells (pods are never
  * obstacles), so a robot cannot enter a cell another robot already occupies.
  *
- * Robots with an empty path and robots at a station are left untouched; moving,
+ * A mover whose next cell holds a parked, unassigned idle robot nudges that
+ * robot one cell aside (fixed N/E/S/W order) before advancing. Robots with an
+ * empty path and robots at a station are otherwise left untouched; moving,
  * blocking, replanning and deadlock recovery are the only state changes here.
  */
 export function updateMovement(world: World): MovementStats {
@@ -358,6 +404,7 @@ export function updateMovement(world: World): MovementStats {
   const occupancy = new Map<string, string>();
   for (const robot of world.robots) occupancy.set(cellKey(robot.cell), robot.id);
 
+  const robotsById = new Map(world.robots.map((robot) => [robot.id, robot]));
   const orderedRobots = [...world.robots].sort(comparePriority);
   const blockedThisTick: Robot[] = [];
 
@@ -366,6 +413,22 @@ export function updateMovement(world: World): MovementStats {
     if (robot.path.length === 0) continue;
 
     const next = robot.path[0]!;
+
+    // A parked idle robot is pushed one cell aside so the mover can advance.
+    // This is what frees dock cells after a deposit and prevents idle robots
+    // from permanently walling off station approaches.
+    if (isInBounds(next, grid)) {
+      const blockerId = occupancy.get(cellKey(next));
+      if (blockerId !== undefined && blockerId !== robot.id) {
+        const blocker = robotsById.get(blockerId);
+        if (blocker !== undefined && isIdleBlocker(blocker)) {
+          if (yieldIdleBlocker(blocker, robot.cell, grid, occupancy)) {
+            stats.moves += 1;
+          }
+        }
+      }
+    }
+
     if (isInBounds(next, grid) && !occupancy.has(cellKey(next))) {
       occupancy.delete(cellKey(robot.cell));
       robot.cell = { x: next.x, y: next.y };
@@ -386,8 +449,6 @@ export function updateMovement(world: World): MovementStats {
       }
     }
   }
-
-  const robotsById = new Map(world.robots.map((robot) => [robot.id, robot]));
   const blockedBy = new Map<string, string>();
   for (const robot of blockedThisTick) {
     if (robot.path.length === 0) continue;
@@ -453,18 +514,22 @@ export function updateMovement(world: World): MovementStats {
     if (choice === undefined) continue;
 
     const { robot: sidestepper, cell: sidestepCell } = choice;
-
-    const goal = sidestepper.path[sidestepper.path.length - 1]!;
     const vacatedKey = cellKey(sidestepper.cell);
 
     occupancy.delete(vacatedKey);
     sidestepper.cell = { x: sidestepCell.x, y: sidestepCell.y };
     occupancy.set(cellKey(sidestepper.cell), sidestepper.id);
+    stats.moves += 1;
+    stats.deadlockEvents += 1;
+
+    // A parked idle robot has no route to resume: nudge it and leave it idle so
+    // allocation can still claim it.
+    if (isIdleBlocker(sidestepper)) continue;
+
+    const goal = sidestepper.path[sidestepper.path.length - 1]!;
     sidestepper.path = [];
     sidestepper.status = isCarrying(sidestepper) ? 'moving_loaded' : 'moving_empty';
     sidestepper.blockedTicks = 0;
-    stats.moves += 1;
-    stats.deadlockEvents += 1;
 
     // A sidestep exists to give up the vacated cell. Planning straight back
     // into it would recreate the same wait cycle on the next tick, so it is
@@ -485,6 +550,21 @@ export function updateMovement(world: World): MovementStats {
       sidestepper.path = findPath(grid, sidestepper.cell, goal, congestionCost);
     }
     stats.replans += 1;
+  }
+
+  // Unassigned robots that just finished a repositioning route (such as a
+  // parking route after service) rejoin the idle pool. This runs after the
+  // whole movement phase so a robot that advanced this tick cannot be shoved
+  // aside by a lower-priority mover in the same tick.
+  for (const robot of world.robots) {
+    if (
+      robot.status === 'moving_empty' &&
+      robot.jobId === null &&
+      !robot.carrying &&
+      robot.path.length === 0
+    ) {
+      robot.status = 'idle';
+    }
   }
 
   return stats;

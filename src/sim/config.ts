@@ -71,9 +71,9 @@ const nonNegative = z.number().min(0);
 const cellTuple = z.tuple([z.number().int(), z.number().int()]);
 
 const defaultStations = [
-  { id: 'S-1', docks: [[0, 25], [0, 26]], queueCapacity: 8, serviceTimeMs: 20000 },
-  { id: 'S-2', docks: [[99, 50], [99, 51]], queueCapacity: 8, serviceTimeMs: 20000 },
-  { id: 'S-3', docks: [[0, 75], [0, 76]], queueCapacity: 8, serviceTimeMs: 20000 },
+  { id: 'S-1', docks: [[0, 25], [0, 26]], queueCapacity: 8, serviceTimeMs: 1000 },
+  { id: 'S-2', docks: [[99, 50], [99, 51]], queueCapacity: 8, serviceTimeMs: 1000 },
+  { id: 'S-3', docks: [[0, 75], [0, 76]], queueCapacity: 8, serviceTimeMs: 1000 },
 ] as const;
 
 const stationSchema = z.object({
