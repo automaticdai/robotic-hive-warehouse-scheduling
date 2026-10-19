@@ -153,23 +153,38 @@ export class SimClient {
     switch (event.type) {
       case 'snapshot': {
         const snapshot = decodeSnapshotEvent(event);
-        for (const callback of this.snapshotCallbacks) callback(snapshot);
+        this.notify(this.snapshotCallbacks, snapshot);
         break;
       }
       case 'status': {
-        for (const callback of this.statusCallbacks) callback(event);
-        for (const callback of this.metricsCallbacks) callback(event.metrics);
+        this.notify(this.statusCallbacks, event);
+        this.notify(this.metricsCallbacks, event.metrics);
         break;
       }
       case 'inspection': {
-        for (const callback of this.inspectionCallbacks) {
-          callback(event.target, event.detail);
-        }
+        this.notify(this.inspectionCallbacks, event.target, event.detail);
         break;
       }
       case 'ready': {
-        for (const callback of this.readyCallbacks) callback(event);
+        this.notify(this.readyCallbacks, event);
         break;
+      }
+    }
+  }
+
+  /**
+   * Dispatches to subscribers one at a time so a throwing subscriber cannot
+   * prevent the remaining subscribers from receiving the event.
+   */
+  private notify<T extends unknown[]>(
+    callbacks: Set<(...args: T) => void>,
+    ...args: T
+  ): void {
+    for (const callback of callbacks) {
+      try {
+        callback(...args);
+      } catch {
+        // A subscriber failure is local to that subscriber.
       }
     }
   }

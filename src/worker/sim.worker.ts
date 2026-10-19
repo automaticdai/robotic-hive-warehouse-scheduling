@@ -28,16 +28,22 @@ const scope = globalThis as unknown as {
 const STATUS_INTERVAL_MS = 200;
 const INSPECTION_INTERVAL_MS = 200;
 const SNAPSHOT_INTERVAL_MS = 50;
+const HEALTH_PROBE_INTERVAL_MS = 2_000;
+const HEALTH_PROBE_TIMEOUT_MS = 1_000;
 
 let sim: Simulation | null = null;
 let loop: SimLoop | null = null;
 let allocator: Allocator | null = null;
 let strategy = 'builtin:fcfs';
 let pythonUrl: string | null = null;
+let pythonOnline = false;
 let inspectionTarget: InspectionTarget | null = null;
-let error: string | null = null;
-let statusTimer: ReturnType<typeof setInterval> | null = null;
-let inspectionTimer: ReturnType<typeof setInterval> | null = null;
+/** Sticky failure surfaced through status until a successful (re)configure. */
+let lastFailure: string | null = null;
+/** Most recent allocation failure, tracked separately from sticky failures. */
+let allocationFailure: string | null = null;
+/** Guards snapshots from loops that a later init/restart has superseded. */
+let generation = 0;
 
 function errorMessage(caught: unknown): string {
   return caught instanceof Error ? caught.message : String(caught);
@@ -59,13 +65,14 @@ function sendStatus(): void {
     running: loop.running,
     simTimeMs: sim.timeMs,
     effectiveSpeed: loop.effectiveSpeed,
-    pythonOnline: pythonUrl !== null,
-    error,
+    pythonOnline,
+    error: lastFailure,
     metrics: sim.getMetrics(),
   });
 }
 
-function handleSnapshot(snapshot: Snapshot): void {
+function handleSnapshot(snapshot: Snapshot, loopGeneration: number): void {
+  if (loopGeneration !== generation) return;
   const encoded = encodeSnapshot(snapshot);
   scope.postMessage(
     {
@@ -128,30 +135,40 @@ function setInspectionTarget(target: InspectionTarget | null): void {
   if (target !== null) sendInspection();
 }
 
-function disposeAllocator(): void {
-  if (allocator instanceof PythonAllocator) void allocator.dispose();
-  allocator = null;
+async function probePythonHealth(): Promise<void> {
+  const url = pythonUrl;
+  if (url === null) {
+    if (pythonOnline) {
+      pythonOnline = false;
+      sendStatus();
+    }
+    return;
+  }
+
+  let online = false;
+  try {
+    const response = await fetch(`${url}/health`, {
+      signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
+    });
+    online = response.ok;
+  } catch {
+    online = false;
+  }
+
+  // A probe started for a previous sidecar URL must not overwrite the badge.
+  if (url !== pythonUrl) return;
+  pythonOnline = online;
+  sendStatus();
 }
 
-function startTimers(): void {
-  if (statusTimer === null) {
-    statusTimer = setInterval(sendStatus, STATUS_INTERVAL_MS);
-  }
-  if (inspectionTimer === null) {
-    inspectionTimer = setInterval(sendInspection, INSPECTION_INTERVAL_MS);
-  }
-}
+function handleAllocationResult(error: unknown | null): void {
+  allocationFailure = error === null ? null : errorMessage(error);
+  if (allocationFailure === null) return;
 
-function createLoop(nextSim: Simulation, nextAllocator: Allocator): SimLoop {
-  const nextLoop = new SimLoop({
-    sim: nextSim,
-    allocator: nextAllocator,
-    tickMs: nextSim.world.config.movement.tickMs,
-    onSnapshot: handleSnapshot,
-    snapshotIntervalMs: SNAPSHOT_INTERVAL_MS,
-  });
-  sim = nextSim;
-  return nextLoop;
+  lastFailure = allocationFailure;
+  // Re-probe immediately: a request failure usually means the sidecar died.
+  void probePythonHealth();
+  sendStatus();
 }
 
 /**
@@ -167,55 +184,96 @@ function createUnavailableAllocator(message: string): Allocator {
   };
 }
 
+function disposeAsync(target: Allocator | null): void {
+  if (target instanceof PythonAllocator) {
+    void target.dispose().catch(() => undefined);
+  }
+}
+
+function buildLoop(
+  nextSim: Simulation,
+  nextAllocator: Allocator,
+  loopGeneration: number,
+): SimLoop {
+  return new SimLoop({
+    sim: nextSim,
+    allocator: nextAllocator,
+    tickMs: nextSim.world.config.movement.tickMs,
+    onSnapshot: (snapshot) => handleSnapshot(snapshot, loopGeneration),
+    snapshotIntervalMs: SNAPSHOT_INTERVAL_MS,
+    onAllocationResult: handleAllocationResult,
+  });
+}
+
 function init(config: SimConfig, options: InitOptions): void {
+  // Build everything first so a constructor failure leaves the old run intact.
+  const nextSim = new Simulation(config);
+  let failure: string | null = null;
+  let nextAllocator: Allocator;
+  try {
+    nextAllocator = createAllocator(options.strategy, {
+      pythonUrl: options.pythonUrl,
+      timeoutMs: config.allocation.timeoutMs,
+    });
+  } catch (caught) {
+    failure = errorMessage(caught);
+    nextAllocator = createUnavailableAllocator(failure);
+  }
+
+  const loopGeneration = ++generation;
+  const nextLoop = buildLoop(nextSim, nextAllocator, loopGeneration);
+  nextLoop.setSpeed(options.speed);
+
   loop?.pause();
-  disposeAllocator();
+  const previousAllocator = allocator;
 
   strategy = options.strategy;
   pythonUrl = options.pythonUrl;
   inspectionTarget = null;
-  error = null;
-
-  // Build the simulation before the allocator: if strategy construction fails
-  // the worker still reports metrics and readiness instead of going silent.
-  const nextSim = new Simulation(config);
-  let nextAllocator: Allocator;
-  try {
-    nextAllocator = createAllocator(strategy, {
-      pythonUrl,
-      timeoutMs: config.allocation.timeoutMs,
-    });
-  } catch (caught) {
-    error = errorMessage(caught);
-    nextAllocator = createUnavailableAllocator(error);
-  }
+  sim = nextSim;
+  loop = nextLoop;
   allocator = nextAllocator;
+  lastFailure = failure;
+  allocationFailure = null;
 
-  loop = createLoop(nextSim, nextAllocator);
-  loop.setSpeed(options.speed);
+  disposeAsync(previousAllocator);
   // A fresh worker starts paused; the client explicitly calls play().
-  startTimers();
   sendReady();
   sendStatus();
+  void probePythonHealth();
 }
 
 function selectStrategy(nextStrategy: string): void {
   const currentSim = sim;
   if (currentSim === null) {
+    // Nothing to configure yet; the next init supplies the timeout budget.
     strategy = nextStrategy;
     return;
   }
 
-  disposeAllocator();
-  const nextAllocator = createAllocator(nextStrategy, {
-    pythonUrl,
-    timeoutMs: currentSim.world.config.allocation.timeoutMs,
-  });
+  // Validate the replacement before touching the running configuration.
+  let nextAllocator: Allocator;
+  try {
+    nextAllocator = createAllocator(nextStrategy, {
+      pythonUrl,
+      timeoutMs: currentSim.world.config.allocation.timeoutMs,
+    });
+  } catch (caught) {
+    lastFailure = errorMessage(caught);
+    sendStatus();
+    return;
+  }
 
+  const previousAllocator = allocator;
   allocator = nextAllocator;
   strategy = nextStrategy;
+  lastFailure = null;
+  allocationFailure = null;
   loop?.setAllocator(nextAllocator);
+
+  disposeAsync(previousAllocator);
   sendStatus();
+  void probePythonHealth();
 }
 
 function restart(config: SimConfig): void {
@@ -224,29 +282,47 @@ function restart(config: SimConfig): void {
     return;
   }
 
-  const wasRunning = loop.running;
-  const speed = loop.effectiveSpeed;
-  loop.pause();
-  disposeAllocator();
+  // Build and validate the replacement first: on failure the current run (and
+  // its running state) stays untouched.
+  let nextSim: Simulation;
+  let nextAllocator: Allocator;
+  try {
+    nextSim = new Simulation(config);
+    nextAllocator = createAllocator(strategy, {
+      pythonUrl,
+      timeoutMs: config.allocation.timeoutMs,
+    });
+  } catch (caught) {
+    lastFailure = errorMessage(caught);
+    sendStatus();
+    return;
+  }
 
-  const nextSim = new Simulation(config);
-  const nextAllocator = createAllocator(strategy, {
-    pythonUrl,
-    timeoutMs: config.allocation.timeoutMs,
-  });
+  const previousLoop = loop;
+  const previousAllocator = allocator;
+  const wasRunning = previousLoop.running;
+  const speed = previousLoop.effectiveSpeed;
+
+  const loopGeneration = ++generation;
+  const nextLoop = buildLoop(nextSim, nextAllocator, loopGeneration);
+  nextLoop.setSpeed(speed);
+
+  previousLoop.pause();
+  sim = nextSim;
+  loop = nextLoop;
   allocator = nextAllocator;
+  lastFailure = null;
+  allocationFailure = null;
 
-  loop = createLoop(nextSim, nextAllocator);
-  loop.setSpeed(speed);
-  if (wasRunning) loop.start();
+  if (wasRunning) nextLoop.start();
 
+  disposeAsync(previousAllocator);
   sendReady();
   sendStatus();
+  void probePythonHealth();
 }
 
 async function handleCommand(command: WorkerCommand): Promise<void> {
-  error = null;
-
   switch (command.type) {
     case 'init':
       init(command.config, command.options);
@@ -283,7 +359,7 @@ scope.onmessage = (event) => {
   // Command failures are reported through status but never tear the worker
   // down: the next command can recover.
   void handleCommand(event.data).catch((caught) => {
-    error = errorMessage(caught);
+    lastFailure = errorMessage(caught);
     try {
       sendStatus();
     } catch {
@@ -291,3 +367,11 @@ scope.onmessage = (event) => {
     }
   });
 };
+
+// Timers are created exactly once for the worker's lifetime and read the
+// current module state, so init/restart cannot stack duplicate intervals.
+setInterval(sendStatus, STATUS_INTERVAL_MS);
+setInterval(sendInspection, INSPECTION_INTERVAL_MS);
+setInterval(() => {
+  if (pythonUrl !== null) void probePythonHealth();
+}, HEALTH_PROBE_INTERVAL_MS);

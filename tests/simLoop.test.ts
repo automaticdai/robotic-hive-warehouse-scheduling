@@ -77,3 +77,90 @@ test('resuming after a pause does not replay the paused wall time', async () => 
     vi.useRealTimers();
   }
 });
+
+test('pause aborts an in-flight turn while an allocation is pending', async () => {
+  const sim = new Simulation(parseConfig(baseConfig));
+  let resolve!: (value: never[]) => void;
+  const allocator = {
+    allocate: () => new Promise<never[]>((r) => { resolve = r; }),
+  };
+  const loop = new SimLoop({ sim, allocator, tickMs: 100, now: () => 0 });
+  loop.setSpeed(16);
+
+  const pending = loop.advanceTo(1000);
+  await Promise.resolve();
+  loop.pause();
+  resolve([]);
+  await pending;
+
+  expect(sim.timeMs).toBe(0);
+});
+
+test('a pause mid-turn does not replay the paused interval on resume', async () => {
+  vi.useFakeTimers();
+  try {
+    const sim = new Simulation(parseConfig(baseConfig));
+    let resolve!: (value: never[]) => void;
+    const allocator = {
+      allocate: () => new Promise<never[]>((r) => { resolve = r; }),
+    };
+    const loop = new SimLoop({
+      sim,
+      allocator,
+      tickMs: 100,
+      now: () => Date.now(),
+    });
+
+    loop.start();
+    await vi.advanceTimersByTimeAsync(100);
+    loop.pause();
+    vi.advanceTimersByTime(10_000);
+    loop.start();
+    resolve([]);
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(sim.timeMs).toBe(100);
+    loop.pause();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('reports successful allocations to onAllocationResult', async () => {
+  const sim = new Simulation(parseConfig(baseConfig));
+  const results: (unknown | null)[] = [];
+  const loop = new SimLoop({
+    sim,
+    allocator: new FcfsAllocator(),
+    tickMs: 100,
+    now: () => 0,
+    onAllocationResult: (result) => results.push(result),
+  });
+
+  await loop.advanceTo(100);
+
+  expect(results).toEqual([null]);
+});
+
+test('reports allocator failures to onAllocationResult and falls back to FCFS', async () => {
+  const sim = new Simulation(parseConfig(baseConfig));
+  const failure = new Error('allocator down');
+  const results: (unknown | null)[] = [];
+  const loop = new SimLoop({
+    sim,
+    allocator: {
+      allocate: () => {
+        throw failure;
+      },
+    },
+    tickMs: 100,
+    now: () => 0,
+    onAllocationResult: (result) => results.push(result),
+  });
+
+  await loop.advanceTo(100);
+
+  expect(results).toHaveLength(1);
+  expect(results[0]).toBe(failure);
+  expect(sim.timeMs).toBe(100);
+});

@@ -1,4 +1,4 @@
-import type { AllocationObservation, Allocator, Assignment } from '@/sim/allocation';
+import type { Allocator, Assignment } from '@/sim/allocation';
 import { FcfsAllocator } from '@/sim/fcfs';
 import type { Simulation, Snapshot } from '@/sim/simulation';
 
@@ -9,6 +9,7 @@ export interface SimLoopOptions {
   now?: () => number;
   onSnapshot?: (snapshot: Snapshot) => void;
   snapshotIntervalMs?: number;
+  onAllocationResult?: (error: unknown | null) => void;
 }
 
 /** Default wall-clock spacing between snapshot callbacks. */
@@ -22,7 +23,8 @@ const MAX_SPEED = 16;
  * `advanceTo` turns elapsed wall time into a tick budget (speed-scaled), then
  * runs ticks until the budget is spent. Allocation boundaries block the turn
  * until the allocator answers, which naturally serialises overlapping timer
- * callbacks through the internal promise chain.
+ * callbacks through the internal promise chain. A pause epoch lets an in-flight
+ * turn notice that it was paused and abandon the rest of its budget.
  */
 export class SimLoop {
   private readonly sim: Simulation;
@@ -30,12 +32,16 @@ export class SimLoop {
   private readonly now: () => number;
   private readonly onSnapshot: ((snapshot: Snapshot) => void) | undefined;
   private readonly snapshotIntervalMs: number;
+  private readonly onAllocationResult:
+    | ((error: unknown | null) => void)
+    | undefined;
 
   private allocator: Allocator;
   private lastNowMs: number;
   private tickBudget = 0;
   private speedMultiplier = 1;
   private isRunning = false;
+  private pauseEpoch = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastSnapshotAtMs = Number.NEGATIVE_INFINITY;
   private chain: Promise<void> = Promise.resolve();
@@ -48,6 +54,7 @@ export class SimLoop {
     this.onSnapshot = options.onSnapshot;
     this.snapshotIntervalMs =
       options.snapshotIntervalMs ?? DEFAULT_SNAPSHOT_INTERVAL_MS;
+    this.onAllocationResult = options.onAllocationResult;
     this.lastNowMs = this.now();
   }
 
@@ -61,10 +68,13 @@ export class SimLoop {
   }
 
   start(): void {
+    // A redundant start while running is a no-op: resetting the clock here
+    // would silently discard elapsed time.
+    if (this.isRunning) return;
+
     this.isRunning = true;
     // Resuming after a pause must not replay the paused wall-clock interval.
     this.lastNowMs = this.now();
-    if (this.timer !== null) return;
     this.timer = setInterval(() => {
       void this.advanceTo(this.now());
     }, this.tickMs);
@@ -72,6 +82,11 @@ export class SimLoop {
 
   pause(): void {
     this.isRunning = false;
+    // Invalidate turns that were queued (or are awaiting an allocator) before
+    // this pause, and drop pacing accumulated for the interrupted turn.
+    this.pauseEpoch += 1;
+    this.tickBudget = 0;
+    this.lastNowMs = this.now();
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
@@ -93,19 +108,28 @@ export class SimLoop {
   /**
    * Advances the simulation by the wall time since the previous turn. Turns are
    * serialised so a timer callback cannot re-enter while an allocation is
-   * pending.
+   * pending. The pause epoch is captured at call time: a turn queued before a
+   * pause aborts without ticking once it gets to run.
    */
   advanceTo(nowMs: number): Promise<void> {
+    const epoch = this.pauseEpoch;
     return this.enqueue(async () => {
+      if (this.pauseEpoch !== epoch) return;
+
       const delta = Math.max(0, nowMs - this.lastNowMs);
-      this.lastNowMs = nowMs;
+      // Never move the clock backwards: a stale turn must not make the next
+      // turn interpret the paused interval as elapsed time.
+      this.lastNowMs = Math.max(this.lastNowMs, nowMs);
       this.tickBudget += (delta * this.speedMultiplier) / this.tickMs;
 
       while (this.tickBudget >= 1) {
+        if (this.pauseEpoch !== epoch) return;
+
         if (this.sim.isAllocationDue()) {
           // Allocation turns do not consume budget: the next iteration either
           // runs an allocation that has since become due or spends on ticks.
           await this.runAllocationTurn();
+          if (this.pauseEpoch !== epoch) return;
         } else {
           this.sim.tick();
           this.tickBudget -= 1;
@@ -137,26 +161,45 @@ export class SimLoop {
   private async runAllocationTurn(): Promise<void> {
     const observation = this.sim.observe();
     const seq = observation.allocationSeq;
-    let assignments: Assignment[];
+    let failure: unknown = null;
 
     try {
-      assignments = await this.allocator.allocate(observation);
-    } catch {
-      if (this.sim.world.config.allocation.onFailure === 'fallback-fcfs') {
-        assignments = await this.runFallback(observation);
-      } else {
-        this.sim.skipAllocation(seq);
-        return;
+      let assignments: Assignment[];
+      try {
+        assignments = await this.allocator.allocate(observation);
+      } catch (caught) {
+        failure = caught;
+        if (this.sim.world.config.allocation.onFailure !== 'fallback-fcfs') {
+          this.sim.skipAllocation(seq);
+          this.notifyAllocationResult(failure);
+          return;
+        }
+        assignments = new FcfsAllocator().allocate(observation);
       }
-    }
 
-    // A stale result means another turn already resolved this sequence; there
-    // is nothing to apply.
-    this.sim.applyAllocation(seq, assignments);
+      // A stale result means another turn already resolved this sequence; the
+      // simulation ignores it, and the observation still counts as answered.
+      this.sim.applyAllocation(seq, assignments);
+      this.notifyAllocationResult(failure);
+    } catch (caught) {
+      // Fallback or apply failed after the observation was taken. Release the
+      // pending sequence so the simulation can never wedge.
+      try {
+        this.sim.skipAllocation(seq);
+      } catch {
+        // The sequence was already resolved; nothing left to release.
+      }
+      this.notifyAllocationResult(caught);
+    }
   }
 
-  private runFallback(observation: AllocationObservation): Promise<Assignment[]> {
-    return Promise.resolve(new FcfsAllocator().allocate(observation));
+  private notifyAllocationResult(error: unknown | null): void {
+    if (this.onAllocationResult === undefined) return;
+    try {
+      this.onAllocationResult(error);
+    } catch {
+      // Observers must not break the simulation loop.
+    }
   }
 
   private emitSnapshotIfDue(): void {

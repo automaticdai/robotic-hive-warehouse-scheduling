@@ -200,7 +200,9 @@ function validateBuffers(buffers: unknown, robotIds: string[]): ArrayBuffer[] {
 
 /** Rebuilds a Snapshot from a worker snapshot event, validating its shape. */
 export function decodeSnapshotEvent(event: SnapshotEvent): Snapshot {
-  if (!isRecord(event)) throw new ProtocolError('Snapshot event must be an object');
+  if (!isRecord(event) || event.type !== 'snapshot') {
+    throw new ProtocolError('Expected a snapshot event');
+  }
   const meta = validateMeta(event.meta);
   const buffers = validateBuffers(event.buffers, meta.robotIds);
   const [robotX, robotY, robotState, robotCarrying, robotBattery, podX, podY, podVisible] =
