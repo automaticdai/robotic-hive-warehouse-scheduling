@@ -3,6 +3,7 @@ import type { SimConfig } from '@/sim/config';
 import { Simulation } from '@/sim/simulation';
 import type { Snapshot } from '@/sim/simulation';
 import { createAllocator } from '@/lib/allocator';
+import { createAllocationFailureReporter } from '@/lib/allocationHealth';
 import { PythonAllocator } from '@/lib/pythonAllocator';
 import { SimLoop } from '@/lib/simLoop';
 import { encodeSnapshot } from './protocol';
@@ -38,10 +39,17 @@ let strategy = 'builtin:fcfs';
 let pythonUrl: string | null = null;
 let pythonOnline = false;
 let inspectionTarget: InspectionTarget | null = null;
-/** Sticky failure surfaced through status until a successful (re)configure. */
-let lastFailure: string | null = null;
-/** Most recent allocation failure, tracked separately from sticky failures. */
+/**
+ * Sticky init/select failure surfaced through status until a successful
+ * init/select clears it.
+ */
+let startupFailure: string | null = null;
+/**
+ * Most recent allocation failure. Transient: the next successful allocation
+ * clears it and immediately reports recovery.
+ */
 let allocationFailure: string | null = null;
+const allocationReporter = createAllocationFailureReporter('live simulation');
 /** Guards snapshots from loops that a later init/restart has superseded. */
 let generation = 0;
 
@@ -65,8 +73,10 @@ function sendStatus(): void {
     running: loop.running,
     simTimeMs: sim.timeMs,
     effectiveSpeed: loop.effectiveSpeed,
+    achievedSpeed: loop.achievedSpeed,
+    strategy,
     pythonOnline,
-    error: lastFailure,
+    error: allocationFailure ?? startupFailure,
     metrics: sim.getMetrics(),
   });
 }
@@ -161,14 +171,25 @@ async function probePythonHealth(): Promise<void> {
   sendStatus();
 }
 
-function handleAllocationResult(error: unknown | null): void {
-  allocationFailure = error === null ? null : errorMessage(error);
-  if (allocationFailure === null) return;
+function handleAllocationResult(
+  error: unknown | null,
+  resultAllocator: Allocator,
+): void {
+  allocationReporter.report(error, resultAllocator);
 
-  lastFailure = allocationFailure;
-  // Re-probe immediately: a request failure usually means the sidecar died.
-  void probePythonHealth();
-  sendStatus();
+  const hadFailure = allocationFailure !== null;
+  allocationFailure = error === null ? null : errorMessage(error);
+
+  if (allocationFailure !== null) {
+    // Re-probe immediately: a request failure usually means the sidecar died.
+    void probePythonHealth();
+    sendStatus();
+    return;
+  }
+
+  // Recovery is observable immediately instead of waiting for the next tick
+  // of the periodic status interval; a stale error must not linger.
+  if (hadFailure) sendStatus();
 }
 
 /**
@@ -207,7 +228,7 @@ function buildLoop(
       // must not set sticky failures, re-probe health, or emit status.
       if (loopGeneration !== generation) return;
       if (resultAllocator !== allocator) return;
-      handleAllocationResult(error);
+      handleAllocationResult(error, resultAllocator);
     },
   });
 }
@@ -224,6 +245,9 @@ function init(config: SimConfig, options: InitOptions): void {
     });
   } catch (caught) {
     failure = errorMessage(caught);
+    console.warn(
+      `[hive-sim] Failed to initialise allocator "${options.strategy}": ${failure}`,
+    );
     nextAllocator = createUnavailableAllocator(failure);
   }
 
@@ -240,7 +264,7 @@ function init(config: SimConfig, options: InitOptions): void {
   sim = nextSim;
   loop = nextLoop;
   allocator = nextAllocator;
-  lastFailure = failure;
+  startupFailure = failure;
   allocationFailure = null;
 
   disposeAsync(previousAllocator);
@@ -266,7 +290,12 @@ function selectStrategy(nextStrategy: string): void {
       timeoutMs: currentSim.world.config.allocation.timeoutMs,
     });
   } catch (caught) {
-    lastFailure = errorMessage(caught);
+    // The previous allocator stays active; report both its identity and the
+    // rejection so the UI can revert the optimistic option immediately.
+    startupFailure = errorMessage(caught);
+    console.warn(
+      `[hive-sim] Strategy select failed for "${nextStrategy}": ${startupFailure}`,
+    );
     sendStatus();
     return;
   }
@@ -274,7 +303,7 @@ function selectStrategy(nextStrategy: string): void {
   const previousAllocator = allocator;
   allocator = nextAllocator;
   strategy = nextStrategy;
-  lastFailure = null;
+  startupFailure = null;
   allocationFailure = null;
   loop?.setAllocator(nextAllocator);
 
@@ -300,7 +329,7 @@ function restart(config: SimConfig): void {
       timeoutMs: config.allocation.timeoutMs,
     });
   } catch (caught) {
-    lastFailure = errorMessage(caught);
+    startupFailure = errorMessage(caught);
     sendStatus();
     return;
   }
@@ -318,7 +347,7 @@ function restart(config: SimConfig): void {
   sim = nextSim;
   loop = nextLoop;
   allocator = nextAllocator;
-  lastFailure = null;
+  startupFailure = null;
   allocationFailure = null;
 
   if (wasRunning) nextLoop.start();
@@ -366,7 +395,7 @@ scope.onmessage = (event) => {
   // Command failures are reported through status but never tear the worker
   // down: the next command can recover.
   void handleCommand(event.data).catch((caught) => {
-    lastFailure = errorMessage(caught);
+    startupFailure = errorMessage(caught);
     try {
       sendStatus();
     } catch {

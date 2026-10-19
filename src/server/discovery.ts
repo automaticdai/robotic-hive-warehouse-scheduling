@@ -2,7 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { defaultConfig, parseConfig } from '@/sim/config';
 import type { SimConfig } from '@/sim/config';
-import { getSidecarInfo } from './pythonSidecar';
+import { revalidateSidecarInfo } from './pythonSidecar';
 
 export interface SimConfigResponse {
   strategies: string[];
@@ -22,9 +22,13 @@ export interface ConfigEntry {
  * Strategy identifiers for the UI: the built-in FCFS allocator first, followed
  * by every bare sidecar module prefixed with `python:`. Duplicates are removed
  * while preserving that order.
+ *
+ * The sidecar state is revalidated on every request so a process that died (or
+ * recovered) after startup is reflected without a page reload. The probe is
+ * bounded and does not spawn a new process on the page-load path.
  */
 export async function getSimConfigResponse(): Promise<SimConfigResponse> {
-  const sidecar = getSidecarInfo();
+  const sidecar = await revalidateSidecarInfo();
 
   const strategies = ['builtin:fcfs'];
   for (const name of sidecar.strategies) {

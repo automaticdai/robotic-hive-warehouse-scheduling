@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { AllocatorError, createAllocator, pythonModuleName } from '../lib/allocator';
+import { createAllocationFailureReporter } from '../lib/allocationHealth';
 import { PythonAllocator } from '../lib/pythonAllocator';
 import { getSidecarInfo, startPythonSidecar, stopPythonSidecar } from '../server/pythonSidecar';
 import type { Allocator, Assignment } from '../sim/allocation';
@@ -16,11 +17,33 @@ import type { HeadlessOptions } from './args';
 export interface HeadlessSummary {
   config: SimConfig;
   seed: number;
+  /** Requested strategy id. Always the id passed on the command line. */
   strategy: string;
   strategyDigest: string;
+  /**
+   * Allocator that produced results. `fallback-fcfs` when any allocation fell
+   * back, otherwise the requested strategy.
+   */
+  effectiveStrategy: string;
+  /** Number of allocation boundaries reached during the run. */
+  allocationAttempts: number;
+  /** Allocation requests that threw or timed out. */
+  allocatorFailures: number;
+  /** Failures resolved by applying the FCFS fallback. */
+  fallbackAllocations: number;
+  /** True when at least one allocation fell back to FCFS. */
+  usedFallback: boolean;
   simDurationMs: number;
   wallTimeMs: number;
   metrics: MetricsSummary;
+}
+
+export interface HeadlessRunOptions extends HeadlessOptions {
+  /**
+   * Test seam: use this allocator instead of the one built from `strategy`.
+   * Production callers never set it.
+   */
+  allocatorOverride?: Allocator;
 }
 
 /**
@@ -68,7 +91,9 @@ function unavailablePythonAllocator(): Allocator {
  * allocation strategy each time allocation is due, then writes the summary,
  * time series, and resolved configuration to `outDir`.
  */
-export async function runHeadless(options: HeadlessOptions): Promise<HeadlessSummary> {
+export async function runHeadless(
+  options: HeadlessRunOptions,
+): Promise<HeadlessSummary> {
   const raw: unknown = JSON.parse(await readFile(options.configPath, 'utf8'));
   let input = raw;
   if (options.seed !== undefined && raw !== null && typeof raw === 'object' && !Array.isArray(raw)) {
@@ -90,7 +115,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessSum
 
   try {
     let allocator: Allocator;
-    if (isPython) {
+    if (options.allocatorOverride !== undefined) {
+      allocator = options.allocatorOverride;
+    } else if (isPython) {
       // Only stop the sidecar if this run is the one that brought it up; a
       // process-wide start (for example instrumentation) keeps it alive.
       startedSidecar = !getSidecarInfo().online;
@@ -114,21 +141,45 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessSum
 
     const sim = new Simulation(config);
     const wallStart = performance.now();
+    const failureReporter = createAllocationFailureReporter('headless run');
+    let allocationAttempts = 0;
+    let allocatorFailures = 0;
+    let fallbackAllocations = 0;
 
     while (sim.timeMs < options.untilMs) {
       if (sim.isAllocationDue()) {
         const observation = sim.observe();
         const seq = observation.allocationSeq;
+        allocationAttempts += 1;
+
+        let assignments: Assignment[] | null = null;
         try {
           // Allocators may answer synchronously or asynchronously (the Python
           // sidecar client is async).
-          const assignments = await allocator.allocate(observation);
-          sim.applyAllocation(seq, assignments);
-        } catch {
+          assignments = await allocator.allocate(observation);
+          failureReporter.report(null, allocator);
+        } catch (error) {
+          allocatorFailures += 1;
+          failureReporter.report(error, allocator);
           if (config.allocation.onFailure === 'fallback-fcfs') {
-            sim.applyAllocation(seq, fallbackAllocator.allocate(observation));
+            fallbackAllocations += 1;
+            assignments = fallbackAllocator.allocate(observation);
           } else {
             sim.skipAllocation(seq);
+          }
+        }
+
+        // Contain an apply failure exactly as before: the sequence must never
+        // wedge, and fallback-fcfs still runs rather than skipping.
+        if (assignments !== null) {
+          try {
+            sim.applyAllocation(seq, assignments);
+          } catch {
+            if (config.allocation.onFailure === 'fallback-fcfs') {
+              sim.applyAllocation(seq, fallbackAllocator.allocate(observation));
+            } else {
+              sim.skipAllocation(seq);
+            }
           }
         }
       }
@@ -140,11 +191,17 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessSum
     const simDurationMs = sim.timeMs;
     const metrics = sim.getMetrics();
 
+    const usedFallback = fallbackAllocations > 0;
     const summary: HeadlessSummary = {
       config,
       seed: config.seed,
       strategy: options.strategy,
       strategyDigest,
+      effectiveStrategy: usedFallback ? 'fallback-fcfs' : options.strategy,
+      allocationAttempts,
+      allocatorFailures,
+      fallbackAllocations,
+      usedFallback,
       simDurationMs,
       wallTimeMs,
       metrics,
@@ -174,6 +231,15 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessSum
       `Sim: ${simHours.toFixed(2)} sim-hours in ${wallSeconds.toFixed(2)} wall-seconds ` +
         `(${realTimeRatio.toFixed(1)}× real time)`,
     );
+
+    if (usedFallback) {
+      console.warn(
+        `[hive-sim] WARNING: ${fallbackAllocations} of ${allocationAttempts} allocations ` +
+          `fell back to FCFS (${allocatorFailures} allocator failures). ` +
+          `This run's metrics are not a pure "${options.strategy}" result; ` +
+          `summary.json records effectiveStrategy="${summary.effectiveStrategy}".`,
+      );
+    }
 
     return summary;
   } finally {

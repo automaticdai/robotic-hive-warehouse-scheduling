@@ -13,6 +13,8 @@ export interface HudClient {
   selectStrategy(strategy: string): void;
   inspect?(target: InspectionTarget | null): void;
   restart?(config: SimConfig): void;
+  /** Restarts the scenario/config that is currently active. */
+  restartCurrent?(): void;
 }
 
 export interface HudScenario {
@@ -23,7 +25,10 @@ export interface HudScenario {
 /** Data fields accepted by `createHudStore`. */
 export interface HudData {
   running: boolean;
+  /** Requested speed multiplier. */
   speed: number;
+  /** Measured sim-time advance per wall time; null while paused/starting. */
+  achievedSpeed: number | null;
   simTimeMs: number;
   metrics: MetricsSummary | null;
   strategies: string[];
@@ -68,6 +73,10 @@ function createHudState(initial: HudData): StateCreator<HudState> {
         running: status.running,
         simTimeMs: status.simTimeMs,
         speed: status.effectiveSpeed,
+        achievedSpeed: status.achievedSpeed ?? null,
+        // The worker acknowledges the active strategy on init/select. A
+        // rejected selection reports the previous strategy, not the request.
+        strategy: status.strategy ?? state.strategy,
         pythonOnline: status.pythonOnline,
         error: status.error,
         metrics: status.metrics,
@@ -110,6 +119,7 @@ export const useHudStore = create<HudState>()(
   createHudState({
     running: false,
     speed: 1,
+    achievedSpeed: null,
     simTimeMs: 0,
     metrics: null,
     strategies: ['builtin:fcfs'],

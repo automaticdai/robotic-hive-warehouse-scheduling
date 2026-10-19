@@ -148,6 +148,19 @@ a {
   color: #c9705a;
 }
 
+.hud-error {
+  max-width: 360px;
+  overflow: hidden;
+  padding: 1px 7px;
+  color: #f0b072;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: rgba(192, 68, 47, 0.18);
+  border: 1px solid rgba(201, 112, 90, 0.6);
+  border-radius: 4px;
+}
+
 .hud-metrics {
   top: 16px;
   left: 16px;
@@ -243,6 +256,21 @@ a {
 .hud-button-primary {
   min-width: 64px;
   border-color: rgba(232, 163, 61, 0.6);
+  color: #e8a33d;
+}
+
+.hud-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.hud-achieved {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(207, 227, 221, 0.6);
+}
+
+.hud-achieved-lagging {
   color: #e8a33d;
 }
 

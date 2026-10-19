@@ -87,3 +87,99 @@ test('ignores allocation failures from a superseded allocator', async () => {
   }
   expect(healthCalls()).toBe(healthCallsBeforeFailure);
 });
+
+function captureEvents(): WorkerEvent[] {
+  const events: WorkerEvent[] = [];
+  vi.stubGlobal('postMessage', (message: WorkerEvent) => {
+    events.push(message);
+  });
+  return events;
+}
+
+function latestStatus(events: WorkerEvent[]) {
+  return events.filter((event) => event.type === 'status').at(-1);
+}
+
+test('clears the allocation error after a failed-then-successful allocation', async () => {
+  const events = captureEvents();
+  let allocateCalls = 0;
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/health')) {
+      return new Response(JSON.stringify({ status: 'ok' }), { status: 200 });
+    }
+    if (url.endsWith('/sessions')) {
+      return new Response(JSON.stringify({ sessionId: 's1', strategy: 'test' }), {
+        status: 200,
+      });
+    }
+    if (url.endsWith('/allocate')) {
+      allocateCalls += 1;
+      if (allocateCalls === 1) throw new Error('sidecar exploded');
+      return new Response(JSON.stringify({ assignments: [] }), { status: 200 });
+    }
+    return new Response('', { status: 200 });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  postCommand({
+    type: 'init',
+    config: parseConfig({ ...baseConfig, allocation: { intervalMs: 100 } }),
+    options: { strategy: 'python:test', pythonUrl: 'http://sidecar.test', speed: 1 },
+  });
+
+  postCommand({ type: 'step' });
+  await vi.waitFor(() => {
+    expect(latestStatus(events)?.error).toContain('sidecar exploded');
+  });
+
+  postCommand({ type: 'step' });
+  await vi.waitFor(() => {
+    expect(allocateCalls).toBe(2);
+    expect(latestStatus(events)?.error).toBeNull();
+  });
+});
+
+test('keeps a startup failure until a successful strategy select', async () => {
+  const events = captureEvents();
+
+  postCommand({
+    type: 'init',
+    config: parseConfig(baseConfig),
+    // A Python strategy with no sidecar URL fails allocator construction.
+    options: { strategy: 'python:test', pythonUrl: null, speed: 1 },
+  });
+  await vi.waitFor(() => {
+    expect(latestStatus(events)?.error).toContain('sidecar is offline');
+  });
+
+  // Allocation failures must not clear the sticky startup failure.
+  postCommand({ type: 'step' });
+  await vi.waitFor(() => {
+    expect(latestStatus(events)?.simTimeMs).toBe(100);
+  });
+  expect(latestStatus(events)?.error).toContain('sidecar is offline');
+
+  // A successful select clears it and acknowledges the active strategy.
+  postCommand({ type: 'selectStrategy', strategy: 'builtin:fcfs' });
+  await vi.waitFor(() => {
+    expect(latestStatus(events)?.error).toBeNull();
+    expect(latestStatus(events)?.strategy).toBe('builtin:fcfs');
+  });
+});
+
+test('reports a rejected strategy without changing the active allocator', async () => {
+  const events = captureEvents();
+
+  postCommand({
+    type: 'init',
+    config: parseConfig(baseConfig),
+    options: { strategy: 'builtin:fcfs', pythonUrl: null, speed: 1 },
+  });
+
+  postCommand({ type: 'selectStrategy', strategy: 'python:not_a_real_strategy_without_url' });
+  await vi.waitFor(() => {
+    expect(latestStatus(events)?.error).toContain('sidecar is offline');
+  });
+  expect(latestStatus(events)?.strategy).toBe('builtin:fcfs');
+});

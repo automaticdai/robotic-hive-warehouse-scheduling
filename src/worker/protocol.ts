@@ -78,7 +78,12 @@ export interface StatusEvent {
   type: 'status';
   running: boolean;
   simTimeMs: number;
+  /** Requested (clamped) speed multiplier. */
   effectiveSpeed: number;
+  /** Measured sim-time advance per wall time, or null while paused/starting. */
+  achievedSpeed?: number | null;
+  /** Allocator that is actually active, acknowledging init/select. */
+  strategy?: string;
   pythonOnline: boolean;
   error: string | null;
   metrics: MetricsSummary;

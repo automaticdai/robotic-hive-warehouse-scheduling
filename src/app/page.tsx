@@ -103,25 +103,29 @@ export default function Page() {
 
   // The HUD talks to this adapter rather than the raw client so scenario
   // restarts also drop the interpolated snapshots from the previous config.
-  const hudClient = useMemo<HudClient>(
-    () => ({
+  const hudClient = useMemo<HudClient>(() => {
+    const restart = (nextConfig: SimConfig): void => {
+      source.clear();
+      client?.restart(nextConfig);
+      // The worker clears its inspection target on restart without echoing
+      // a clear, so reset the client-side selection/inspection explicitly.
+      useHudStore.getState().setSelected(null);
+      setConfig(nextConfig);
+    };
+
+    return {
       play: () => client?.play(),
       pause: () => client?.pause(),
       step: () => client?.step(),
       setSpeed: (speed) => client?.setSpeed(speed),
       selectStrategy: (strategy) => client?.selectStrategy(strategy),
       inspect: (target) => client?.inspect(target),
-      restart: (nextConfig) => {
-        source.clear();
-        client?.restart(nextConfig);
-        // The worker clears its inspection target on restart without echoing
-        // a clear, so reset the client-side selection/inspection explicitly.
-        useHudStore.getState().setSelected(null);
-        setConfig(nextConfig);
+      restart,
+      restartCurrent: () => {
+        if (config !== null) restart(config);
       },
-    }),
-    [client, source],
-  );
+    };
+  }, [client, config, source]);
 
   return (
     <main>

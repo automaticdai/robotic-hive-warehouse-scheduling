@@ -14,6 +14,27 @@ export interface PythonAllocatorOptions {
 
 const MALFORMED = Symbol('malformed-json');
 
+/**
+ * HTTP failure from the sidecar, retaining the status for session recovery.
+ * The status is attached to an `AllocatorError` rather than subclassing it:
+ * `allocator.ts` imports this module, so evaluating a subclass here would
+ * depend on the cycle having initialised the base class first.
+ */
+interface SidecarHttpError extends AllocatorError {
+  readonly status: number;
+}
+
+function sidecarHttpError(status: number, message: string): SidecarHttpError {
+  const error = new AllocatorError(message) as SidecarHttpError & { status: number };
+  error.name = 'SidecarHttpError';
+  error.status = status;
+  return error;
+}
+
+function isSessionGone(error: unknown): boolean {
+  return error instanceof AllocatorError && (error as SidecarHttpError).status === 404;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -62,11 +83,12 @@ export class PythonAllocator implements Allocator {
   }
 
   async allocate(observation: AllocationObservation): Promise<Assignment[]> {
-    const sessionId = await this.ensureSession();
-    const payload = await this.request(`/sessions/${sessionId}/allocate`, {
-      method: 'POST',
-      body: JSON.stringify(observation),
-    });
+    const payload = await this.withSession((sessionId) =>
+      this.request(`/sessions/${sessionId}/allocate`, {
+        method: 'POST',
+        body: JSON.stringify(observation),
+      }),
+    );
 
     if (!isRecord(payload) || !Array.isArray(payload.assignments)) {
       throw new AllocatorError('Python sidecar returned a malformed allocate response');
@@ -75,11 +97,12 @@ export class PythonAllocator implements Allocator {
   }
 
   async select(strategy: string): Promise<void> {
-    const sessionId = await this.ensureSession();
-    await this.request(`/sessions/${sessionId}/select`, {
-      method: 'POST',
-      body: JSON.stringify({ strategy }),
-    });
+    await this.withSession((sessionId) =>
+      this.request(`/sessions/${sessionId}/select`, {
+        method: 'POST',
+        body: JSON.stringify({ strategy }),
+      }),
+    );
     this.strategy = strategy;
   }
 
@@ -105,6 +128,34 @@ export class PythonAllocator implements Allocator {
       await this.request(`/sessions/${sessionId}`, { method: 'DELETE' });
     } catch {
       // Best effort: the sidecar may already be gone or shutting down.
+    }
+  }
+
+  /**
+   * Runs a session-scoped request, recreating the session once when the
+   * sidecar reports 404 (for example after it restarted and lost its session
+   * table). The retry is bounded to one fresh session: if the replacement is
+   * rejected too, the error propagates and the configured failure policy
+   * applies, so a persistent 404 cannot create a create/delete loop.
+   */
+  private async withSession<T>(
+    operation: (sessionId: string) => Promise<T>,
+  ): Promise<T> {
+    const sessionId = await this.ensureSession();
+    try {
+      return await operation(sessionId);
+    } catch (error) {
+      if (!isSessionGone(error)) throw error;
+
+      if (this.sessionId === sessionId) {
+        this.sessionId = null;
+        this.sessionPromise = null;
+      }
+
+      const freshSessionId = await this.ensureSession();
+      // A server that echoes the dead id would otherwise loop forever.
+      if (freshSessionId === sessionId) throw error;
+      return operation(freshSessionId);
     }
   }
 
@@ -187,7 +238,10 @@ export class PythonAllocator implements Allocator {
     if (!ok) {
       const detail =
         isRecord(body) && typeof body.error === 'string' ? body.error : `HTTP ${status}`;
-      throw new AllocatorError(`Python sidecar request ${pathname} failed: ${detail}`);
+      throw sidecarHttpError(
+        status,
+        `Python sidecar request ${pathname} failed: ${detail}`,
+      );
     }
 
     if (body === MALFORMED) {

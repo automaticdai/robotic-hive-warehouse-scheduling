@@ -4,6 +4,10 @@ test('fills defaults for an empty object', () => {
   expect(parseConfig({})).toEqual(defaultConfig);
 });
 
+test('rejects an empty stations array', () => {
+  expect(() => parseConfig({ stations: [] })).toThrow(ConfigError);
+});
+
 test('rejects a dock outside the grid', () => {
   expect(() =>
     parseConfig({

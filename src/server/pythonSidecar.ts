@@ -13,6 +13,8 @@ export interface SidecarInfo {
 interface SidecarCache {
   child: ChildProcess | null;
   info: SidecarInfo;
+  /** Address of the last successfully started sidecar, kept for recovery. */
+  lastUrl: string | null;
   startPromise: Promise<SidecarInfo> | null;
   cleanupRegistered: boolean;
 }
@@ -20,6 +22,8 @@ interface SidecarCache {
 const GLOBAL_KEY = '__hiveSimPythonSidecarCache' as const;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 const PROBE_TIMEOUT_MS = 5_000;
+/** Revalidation runs on the page-load path, so keep its probe short. */
+const REVALIDATE_PROBE_TIMEOUT_MS = 1_500;
 const HANDSHAKE_LINE_TYPE = 'hive-sim-sidecar';
 
 function offlineInfo(): SidecarInfo {
@@ -37,6 +41,7 @@ function getCache(): SidecarCache {
   holder[GLOBAL_KEY] ??= {
     child: null,
     info: offlineInfo(),
+    lastUrl: null,
     startPromise: null,
     cleanupRegistered: false,
   };
@@ -207,8 +212,8 @@ function spawnSidecar(): Promise<SpawnedSidecar> {
   });
 }
 
-async function fetchJson(url: string): Promise<unknown> {
-  const response = await fetch(url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+async function fetchJson(url: string, timeoutMs: number): Promise<unknown> {
+  const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   if (!response.ok) {
     throw new Error(`GET ${url} returned HTTP ${response.status}`);
   }
@@ -216,8 +221,11 @@ async function fetchJson(url: string): Promise<unknown> {
 }
 
 /** GET /strategies and return the bare module names. */
-async function probeStrategies(url: string): Promise<string[]> {
-  const payload = await fetchJson(`${url}/strategies`);
+async function probeStrategies(
+  url: string,
+  timeoutMs = PROBE_TIMEOUT_MS,
+): Promise<string[]> {
+  const payload = await fetchJson(`${url}/strategies`, timeoutMs);
   if (!isRecord(payload) || !Array.isArray(payload.strategies)) {
     throw new Error('sidecar returned a malformed strategy list');
   }
@@ -231,8 +239,8 @@ async function probeStrategies(url: string): Promise<string[]> {
   return [...new Set(names)];
 }
 
-async function probeHealth(url: string): Promise<void> {
-  const payload = await fetchJson(`${url}/health`);
+async function probeHealth(url: string, timeoutMs = PROBE_TIMEOUT_MS): Promise<void> {
+  const payload = await fetchJson(`${url}/health`, timeoutMs);
   if (!isRecord(payload) || payload.status !== 'ok') {
     throw new Error('sidecar health check failed');
   }
@@ -248,6 +256,7 @@ async function spawnAndProbe(cache: SidecarCache): Promise<SidecarInfo> {
 
     await probeHealth(url);
     const strategies = await probeStrategies(url);
+    cache.lastUrl = url;
     cache.info = { url, online: true, strategies };
   } catch (error) {
     console.warn(`[hive-sim] Python sidecar unavailable: ${errorMessage(error)}`);
@@ -261,12 +270,17 @@ async function spawnAndProbe(cache: SidecarCache): Promise<SidecarInfo> {
   return copyInfo(cache.info);
 }
 
-async function reprobe(cache: SidecarCache): Promise<SidecarInfo> {
+async function reprobe(
+  cache: SidecarCache,
+  timeoutMs = PROBE_TIMEOUT_MS,
+): Promise<SidecarInfo> {
   const url = cache.info.url;
   if (url === null) return copyInfo(offlineInfo());
 
   try {
-    const strategies = await probeStrategies(url);
+    await probeHealth(url, timeoutMs);
+    const strategies = await probeStrategies(url, timeoutMs);
+    cache.lastUrl = url;
     cache.info = { url, online: true, strategies };
   } catch (error) {
     console.warn(`[hive-sim] Python sidecar probe failed: ${errorMessage(error)}`);
@@ -321,6 +335,41 @@ export function getSidecarInfo(): SidecarInfo {
 }
 
 /**
+ * Revalidates the sidecar and returns its current state. Used on the
+ * `/api/sim-config` path so a process that died (or came back) is not masked by
+ * a forever-stale cache. The probe is bounded to keep page-load latency
+ * reasonable; a sidecar that was never started stays offline rather than
+ * blocking the request on a spawn.
+ */
+export async function revalidateSidecarInfo(): Promise<SidecarInfo> {
+  const cache = getCache();
+
+  if (cache.startPromise !== null) {
+    try {
+      return await cache.startPromise;
+    } catch {
+      return copyInfo(offlineInfo());
+    }
+  }
+
+  if (cache.info.online) {
+    // Probe the known-good address with the short page-load budget rather than
+    // the longer spawn/probe timeout used off the request path.
+    return reprobe(cache, REVALIDATE_PROBE_TIMEOUT_MS);
+  }
+
+  // A previous probe may have marked the sidecar offline while the process is
+  // still alive (transient failure). Retry the last known address so it can
+  // recover without a page reload.
+  if (cache.lastUrl !== null && cache.child !== null) {
+    cache.info = { url: cache.lastUrl, online: false, strategies: ['builtin:fcfs'] };
+    return reprobe(cache, REVALIDATE_PROBE_TIMEOUT_MS);
+  }
+
+  return copyInfo(cache.info);
+}
+
+/**
  * Kills the sidecar (if any), clears the cache, and resets to the offline
  * fallback. Safe to call when nothing was started.
  */
@@ -338,6 +387,7 @@ export async function stopPythonSidecar(): Promise<void> {
 
   const child = cache.child;
   cache.child = null;
+  cache.lastUrl = null;
   cache.info = offlineInfo();
   if (cache.startPromise === pending) cache.startPromise = null;
 

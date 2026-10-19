@@ -126,6 +126,48 @@ test('a pause mid-turn does not replay the paused interval on resume', async () 
   }
 });
 
+test('reports achieved speed over a wall-time window and null while paused', async () => {
+  vi.useFakeTimers();
+  try {
+    const sim = new Simulation(parseConfig(baseConfig));
+    const loop = new SimLoop({
+      sim,
+      allocator: new FcfsAllocator(),
+      tickMs: 100,
+      now: () => Date.now(),
+    });
+    loop.setSpeed(2);
+    loop.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(loop.achievedSpeed).not.toBeNull();
+    expect(loop.achievedSpeed!).toBeCloseTo(2, 1);
+
+    loop.pause();
+    expect(loop.achievedSpeed).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('achieved speed starts as null until a window has elapsed', () => {
+  vi.useFakeTimers();
+  try {
+    const sim = new Simulation(parseConfig(baseConfig));
+    const loop = new SimLoop({
+      sim,
+      allocator: new FcfsAllocator(),
+      tickMs: 100,
+      now: () => Date.now(),
+    });
+    loop.start();
+    expect(loop.achievedSpeed).toBeNull();
+    loop.pause();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test('reports successful allocations to onAllocationResult', async () => {
   const sim = new Simulation(parseConfig(baseConfig));
   const results: (unknown | null)[] = [];

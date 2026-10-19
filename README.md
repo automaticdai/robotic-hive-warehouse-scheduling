@@ -42,6 +42,16 @@ Open <http://localhost:3000>. The Next.js Node runtime auto-starts the Python si
 `Python offline — FCFS only`. If Python cannot start, the built-in FCFS allocator keeps
 working. Set `HIVE_PYTHON` to a different interpreter path if `python3` is not on `PATH`.
 
+A boot failure (for example `/api/sim-config` failing) and any allocator/strategy failure
+are shown in an alert badge in the top bar, even before a scenario has loaded. An
+allocation that times out or returns an error falls back to FCFS per
+`allocation.onFailure`; the error clears as soon as the next allocation succeeds, and a
+failed init or strategy hot-swap stays visible until a later init/select succeeds. Failure
+and recovery are also logged once per allocator to the browser console rather than once
+per allocation. The sidecar discovery endpoint revalidates each request, so a sidecar that
+dies or recovers is reflected without a page reload; a `PythonAllocator` also recreates
+its session once if the sidecar reports that the cached session is unknown (404).
+
 ### Layout and controls
 
 The UI uses layout A — a full-bleed hive with floating glass panels:
@@ -52,12 +62,15 @@ The UI uses layout A — a full-bleed hive with floating glass panels:
 - **Top-right inspector:** click a robot to see its state, battery, job, order, assigned
   station, path progress and carrying flag; click a station to see queue length/capacity,
   busy state and remaining service time.
-- **Bottom dock:** Play/Pause, Step, speed selector (0.25×, 0.5×, 1×, 2×, 4×, 8×, 16×),
-  algorithm selector, scenario selector, and the robot-state legend.
+- **Bottom dock:** Play/Pause, Step, Restart, speed selector (0.25×, 0.5×, 1×, 2×, 4×,
+  8×, 16×), measured achieved speed, algorithm selector, scenario selector, and the
+  robot-state legend.
 - **Scene:** instanced robots and pods, grid floor and station meshes, with orbit/zoom
-  camera controls. The algorithm selector hot-swaps the allocator on the next allocation
-  tick, keeping the same world. Choosing a scenario restarts the simulation with that
-  config.
+  camera controls. The algorithm selector requests a hot-swap on the next allocation
+  tick, keeping the same world; the label changes only after the worker acknowledges the
+  active strategy, so a rejected strategy leaves the previous label in place and shows
+  the error. Choosing a scenario restarts the simulation with that config, and **Restart**
+  reruns the currently active config without reselecting it.
 
 ## Headless runs
 
@@ -82,7 +95,14 @@ strategy starts its own sidecar for the run; if it is unavailable, the configure
 Each run writes three files to the output directory:
 
 - **`summary.json`** — resolved config, seed, strategy id, strategy digest, simulated
-  duration, wall time, and the full `MetricsSummary`.
+  duration, wall time, and the full `MetricsSummary`. It also records allocator fallback
+  accounting: `effectiveStrategy`, `allocationAttempts`, `allocatorFailures`,
+  `fallbackAllocations`, and `usedFallback`. `strategy` remains the requested id;
+  `effectiveStrategy` is `fallback-fcfs` when any allocation fell back, so a run in which
+  a Python strategy never answered is never presented as a pure Python result.
+  Headless runs print a warning on the first allocator failure and a prominent summary
+  warning at the end when fallback was used; they do not change the exit code, because
+  `fallback-fcfs` is configured behavior.
 - **`metrics.csv`** — time series sampled every 1 s of simulated time with columns
   `simTimeMs,ordersCompleted,jobsCompleted,throughputPerHour,utilisation,pendingJobs,avgQueueLength`.
 - **`config.resolved.json`** — the config after defaults have been applied.
@@ -260,9 +280,12 @@ its pods are serviced and the packing timer finishes.
 - **Live:** 2,000 robots at ≥30 fps while the simulation advances at 1×. This browser
   check is an outstanding manual acceptance target; it is **not** measured by the headless
   benchmark and is listed as such in [`docs/benchmarks.md`](docs/benchmarks.md).
-- Ticks are never skipped or merged. Requested speed is a target rate; if the machine
-  cannot keep up, simulated time falls behind and the HUD reports effective speed. The
-  default allocation wall-clock timeout is 2 s, after which FCFS fallback applies.
+- Ticks are never skipped or merged. Requested speed is a target rate; the HUD shows the
+  requested multiplier and, separately, the measured achieved speed (simulated time
+  advanced per wall time over a short window). When the achieved rate falls materially
+  below the target while running, the achieved value is highlighted in amber. Paused runs
+  report no achieved speed. The default allocation wall-clock timeout is 2 s, after which
+  FCFS fallback applies.
 
 ## Adding a scenario
 
@@ -278,8 +301,9 @@ Key fields: `grid {width, height}`, `robots`, `pods {count, replenishDelayMs}`,
 `allocation {intervalMs, strategy, timeoutMs, onFailure}`, `movement {tickMs}`, `seed`.
 
 Validation rules include: positive integers for sizes and durations; `robots` no greater
-than the grid cell count; `robots + pods.count` no greater than the grid cell count; docks
-inside the grid; unique station ids and dock cells; `linesPerOrder.min <= max`. Invalid
+than the grid cell count; `robots + pods.count` no greater than the grid cell count; at
+least one station, with docks inside the grid; unique station ids and dock cells;
+`linesPerOrder.min <= max`. Invalid
 files are skipped by discovery with a warning, so a broken scenario does not prevent the
 UI from loading.
 

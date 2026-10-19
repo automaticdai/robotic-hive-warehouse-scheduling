@@ -16,6 +16,11 @@ export interface SimLoopOptions {
 const DEFAULT_SNAPSHOT_INTERVAL_MS = 50;
 const MIN_SPEED = 0.25;
 const MAX_SPEED = 16;
+/**
+ * Wall-clock window over which achieved speed is measured. Long enough to
+ * smooth allocation-boundary stalls, short enough to report lag promptly.
+ */
+const ACHIEVED_SPEED_WINDOW_MS = 500;
 
 /**
  * Wall-clock pacing loop around the deterministic simulation.
@@ -45,6 +50,9 @@ export class SimLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastSnapshotAtMs = Number.NEGATIVE_INFINITY;
   private chain: Promise<void> = Promise.resolve();
+  private achieved: number | null = null;
+  private measureWallMs: number;
+  private measureSimMs: number;
 
   constructor(options: SimLoopOptions) {
     this.sim = options.sim;
@@ -56,6 +64,8 @@ export class SimLoop {
       options.snapshotIntervalMs ?? DEFAULT_SNAPSHOT_INTERVAL_MS;
     this.onAllocationResult = options.onAllocationResult;
     this.lastNowMs = this.now();
+    this.measureWallMs = this.lastNowMs;
+    this.measureSimMs = this.sim.timeMs;
   }
 
   get running(): boolean {
@@ -67,6 +77,16 @@ export class SimLoop {
     return this.speedMultiplier;
   }
 
+  /**
+   * Measured simulated-time advance per unit of wall time over the most recent
+   * window, or null while paused or before a full window has elapsed. This is
+   * the observed rate, not the requested multiplier: allocation stalls and
+   * machine limitations show up here.
+   */
+  get achievedSpeed(): number | null {
+    return this.isRunning ? this.achieved : null;
+  }
+
   start(): void {
     // A redundant start while running is a no-op: resetting the clock here
     // would silently discard elapsed time.
@@ -75,6 +95,7 @@ export class SimLoop {
     this.isRunning = true;
     // Resuming after a pause must not replay the paused wall-clock interval.
     this.lastNowMs = this.now();
+    this.resetAchievedSpeedWindow(this.lastNowMs);
     this.timer = setInterval(() => {
       void this.advanceTo(this.now());
     }, this.tickMs);
@@ -87,6 +108,10 @@ export class SimLoop {
     this.pauseEpoch += 1;
     this.tickBudget = 0;
     this.lastNowMs = this.now();
+    // A paused run has no meaningful achieved rate; do not report a stale one.
+    this.achieved = null;
+    this.measureWallMs = this.lastNowMs;
+    this.measureSimMs = this.sim.timeMs;
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
@@ -96,9 +121,12 @@ export class SimLoop {
   setSpeed(multiplier: number): void {
     if (!Number.isFinite(multiplier)) {
       this.speedMultiplier = MIN_SPEED;
-      return;
+    } else {
+      this.speedMultiplier = Math.min(MAX_SPEED, Math.max(MIN_SPEED, multiplier));
     }
-    this.speedMultiplier = Math.min(MAX_SPEED, Math.max(MIN_SPEED, multiplier));
+    // Start a fresh measurement window so the HUD does not briefly compare a
+    // new target against the previous target's achieved rate.
+    this.resetAchievedSpeedWindow(this.now());
   }
 
   setAllocator(allocator: Allocator): void {
@@ -136,6 +164,7 @@ export class SimLoop {
         }
       }
 
+      this.updateAchievedSpeed(nowMs);
       this.emitSnapshotIfDue();
     });
   }
@@ -148,6 +177,23 @@ export class SimLoop {
       this.sim.tick();
       this.emitSnapshotIfDue();
     });
+  }
+
+  private resetAchievedSpeedWindow(wallMs: number): void {
+    this.measureWallMs = wallMs;
+    this.measureSimMs = this.sim.timeMs;
+    this.achieved = null;
+  }
+
+  private updateAchievedSpeed(wallMs: number): void {
+    if (!this.isRunning) return;
+    const elapsedWallMs = wallMs - this.measureWallMs;
+    if (elapsedWallMs < ACHIEVED_SPEED_WINDOW_MS) return;
+
+    const elapsedSimMs = this.sim.timeMs - this.measureSimMs;
+    this.achieved = elapsedWallMs > 0 ? Math.max(0, elapsedSimMs) / elapsedWallMs : null;
+    this.measureWallMs = wallMs;
+    this.measureSimMs = this.sim.timeMs;
   }
 
   private enqueue(task: () => Promise<void>): Promise<void> {

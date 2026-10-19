@@ -26,6 +26,81 @@ test('posts the observation and returns assignments', async () => {
   server.close();
 });
 
+test('recovers from a 404 on a session endpoint by creating one fresh session', async () => {
+  let sessionCreations = 0;
+  const allocateCalls: string[] = [];
+  const assignments = [{ jobId: 'J-1', robotId: 'R-1', stationId: 'S-1' }];
+
+  const server = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/sessions') {
+      sessionCreations += 1;
+      res.end(JSON.stringify({ sessionId: `s${sessionCreations}`, strategy: 'auction' }));
+      return;
+    }
+    if (req.url?.includes('/allocate')) {
+      allocateCalls.push(req.url);
+      if (req.url.includes('/s1/')) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: 'unknown session' }));
+        return;
+      }
+      res.end(JSON.stringify({ assignments }));
+      return;
+    }
+    res.end('');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  const allocator = new PythonAllocator({
+    baseUrl: `http://127.0.0.1:${port}`,
+    strategy: 'auction',
+    timeoutMs: 500,
+  });
+
+  await expect(allocator.allocate(observation() as any)).resolves.toEqual(assignments);
+
+  expect(sessionCreations).toBe(2);
+  expect(allocateCalls).toEqual(['/sessions/s1/allocate', '/sessions/s2/allocate']);
+
+  await allocator.dispose();
+  server.close();
+});
+
+test('a persistent 404 does not loop session creation', async () => {
+  let sessionCreations = 0;
+  let allocateCalls = 0;
+  const server = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/sessions') {
+      sessionCreations += 1;
+      res.end(JSON.stringify({ sessionId: `s${sessionCreations}`, strategy: 'auction' }));
+      return;
+    }
+    if (req.url?.includes('/allocate')) {
+      allocateCalls += 1;
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: 'unknown session' }));
+      return;
+    }
+    res.end('');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  const allocator = new PythonAllocator({
+    baseUrl: `http://127.0.0.1:${port}`,
+    strategy: 'auction',
+    timeoutMs: 500,
+  });
+
+  await expect(allocator.allocate(observation() as any)).rejects.toBeInstanceOf(AllocatorError);
+  expect(sessionCreations).toBe(2);
+  expect(allocateCalls).toBe(2);
+
+  await allocator.dispose();
+  server.close();
+});
+
 test('times out and raises AllocatorTimeoutError', async () => {
   const server = createServer(() => { /* never respond */ });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));

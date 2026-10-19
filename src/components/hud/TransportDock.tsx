@@ -11,6 +11,13 @@ export interface TransportDockProps {
 
 const SPEEDS = [0.25, 0.5, 1, 2, 4, 8, 16];
 
+/** Achieved speed is considered lagging below this fraction of the target. */
+const LAG_WARNING_RATIO = 0.75;
+
+function formatMultiplier(value: number): string {
+  return `${Math.round(value * 100) / 100}×`;
+}
+
 const LEGEND = [
   { label: 'idle', color: '#5f7d8c' },
   { label: 'moving empty', color: '#e8a33d' },
@@ -22,6 +29,9 @@ const LEGEND = [
 export function TransportDock({ client, state }: TransportDockProps) {
   const running = useStore(state, (s) => s.running);
   const speed = useStore(state, (s) => s.speed);
+  const achievedSpeed = useStore(state, (s) => s.achievedSpeed);
+  const lagging =
+    running && achievedSpeed !== null && achievedSpeed < speed * LAG_WARNING_RATIO;
   const strategies = useStore(state, (s) => s.strategies);
   const strategy = useStore(state, (s) => s.strategy);
   const scenarios = useStore(state, (s) => s.scenarios);
@@ -42,6 +52,14 @@ export function TransportDock({ client, state }: TransportDockProps) {
       <button type="button" className="hud-button" onClick={() => client.step()}>
         Step
       </button>
+      <button
+        type="button"
+        className="hud-button"
+        onClick={() => client.restartCurrent?.()}
+        disabled={client.restartCurrent === undefined}
+      >
+        Restart
+      </button>
       <label className="hud-control">
         <span>Speed</span>
         <select
@@ -56,16 +74,22 @@ export function TransportDock({ client, state }: TransportDockProps) {
           ))}
         </select>
       </label>
+      <span
+        className={`hud-achieved ${lagging ? 'hud-achieved-lagging' : ''}`}
+        aria-label="Achieved speed"
+      >
+        {running
+          ? achievedSpeed === null
+            ? 'achieved —'
+            : `achieved ${formatMultiplier(achievedSpeed)}`
+          : 'achieved —'}
+      </span>
       <label className="hud-control">
         <span>Algorithm</span>
         <select
           aria-label="Algorithm"
           value={strategy}
-          onChange={(event) => {
-            const next = event.target.value;
-            client.selectStrategy(next);
-            state.getState().setStrategy(next);
-          }}
+          onChange={(event) => client.selectStrategy(event.target.value)}
         >
           {strategies.map((option) => (
             <option key={option} value={option}>

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { render, screen, fireEvent } from '@testing-library/react';
+import { act, render, screen, fireEvent } from '@testing-library/react';
 import { Hud } from '@/components/hud/Hud';
 import { createHudStore } from '@/lib/hudStore';
 
@@ -8,7 +8,7 @@ test('renders live metrics and sends run commands', () => {
   const calls: string[] = [];
   const client = { play: () => calls.push('play'), pause: () => calls.push('pause') } as any;
   const state = createHudStore({
-    running: false, speed: 1, simTimeMs: 4000,
+    running: false, speed: 1, achievedSpeed: null, simTimeMs: 4000,
     metrics: {
       simTimeMs: 4000, ordersCompleted: 12, jobsCompleted: 30,
       throughputPerHour: 1080, throughputWindowPerHour: 1080,
@@ -49,6 +49,7 @@ function emptyHudData() {
   return {
     running: false,
     speed: 1,
+    achievedSpeed: null,
     simTimeMs: 0,
     metrics: null,
     strategies: ['builtin:fcfs'],
@@ -78,6 +79,8 @@ test('applyMetrics appends and caps throughput history at 120; applyStatus route
     running: true,
     simTimeMs: 5000,
     effectiveSpeed: 2,
+    achievedSpeed: 1.5,
+    strategy: 'python:auction',
     pythonOnline: true,
     error: null,
     metrics: makeMetrics(42),
@@ -86,8 +89,58 @@ test('applyMetrics appends and caps throughput history at 120; applyStatus route
   expect(state.getState().running).toBe(true);
   expect(state.getState().simTimeMs).toBe(5000);
   expect(state.getState().speed).toBe(2);
+  expect(state.getState().achievedSpeed).toBe(1.5);
+  expect(state.getState().strategy).toBe('python:auction');
   expect(state.getState().pythonOnline).toBe(true);
   expect(state.getState().metrics?.throughputPerHour).toBe(42);
   expect(state.getState().throughputHistory).toHaveLength(120);
   expect(state.getState().throughputHistory.at(-1)).toBe(42);
+});
+
+test('renders a boot error when no config or metrics exist', () => {
+  const client = {} as any;
+  const state = createHudStore({
+    ...emptyHudData(),
+    error: 'Simulation config request failed (500)',
+  });
+  render(<Hud client={client} state={state} />);
+  expect(screen.getByRole('alert')).toHaveTextContent(
+    'Simulation config request failed (500)',
+  );
+});
+
+test('renders an allocation error and clears it on recovery', () => {
+  const client = {} as any;
+  const state = createHudStore(emptyHudData());
+  render(<Hud client={client} state={state} />);
+
+  act(() => {
+    state.getState().applyStatus({
+      type: 'status',
+      running: true,
+      simTimeMs: 0,
+      effectiveSpeed: 1,
+      achievedSpeed: null,
+      strategy: 'python:auction',
+      pythonOnline: true,
+      error: 'Python sidecar request /sessions/s1/allocate failed: HTTP 500',
+      metrics: makeMetrics(10),
+    });
+  });
+  expect(screen.getByRole('alert')).toHaveTextContent('HTTP 500');
+
+  act(() => {
+    state.getState().applyStatus({
+      type: 'status',
+      running: true,
+      simTimeMs: 100,
+      effectiveSpeed: 1,
+      achievedSpeed: 1,
+      strategy: 'python:auction',
+      pythonOnline: true,
+      error: null,
+      metrics: makeMetrics(10),
+    });
+  });
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });

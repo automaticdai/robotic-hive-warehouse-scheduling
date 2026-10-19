@@ -66,6 +66,55 @@ test('accepts only positive integer durations with ms/s/m/h suffixes', () => {
   expect(() => parseDuration('10')).toThrow();
 });
 
+test('records allocator failures and FCFS fallbacks in the summary', async () => {
+  const outDir = await mkdtemp(path.join(tmpdir(), 'hive-failing-'));
+  const warnings: string[] = [];
+  const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+    warnings.push(args.map(String).join(' '));
+  });
+
+  try {
+    const summary = await runHeadless({
+      configPath: 'configs/smoke.json',
+      strategy: 'python:failing_fixture',
+      untilMs: 5_000,
+      seed: 42,
+      outDir,
+      allocatorOverride: {
+        allocate() {
+          throw new Error('allocator unavailable for test');
+        },
+      },
+    });
+
+    // The requested strategy remains recorded, but the effective allocator
+    // and fallback counts make the substitution explicit.
+    expect(summary.strategy).toBe('python:failing_fixture');
+    expect(summary.strategyDigest).toBe('unavailable');
+    expect(summary.allocationAttempts).toBeGreaterThan(0);
+    expect(summary.allocatorFailures).toBe(summary.allocationAttempts);
+    expect(summary.fallbackAllocations).toBe(summary.allocationAttempts);
+    expect(summary.usedFallback).toBe(true);
+    expect(summary.effectiveStrategy).toBe('fallback-fcfs');
+
+    const written = JSON.parse(await readFile(path.join(outDir, 'summary.json'), 'utf8'));
+    expect(written.strategy).toBe('python:failing_fixture');
+    expect(written.effectiveStrategy).toBe('fallback-fcfs');
+    expect(written.allocatorFailures).toBe(summary.allocatorFailures);
+    expect(written.fallbackAllocations).toBe(summary.fallbackAllocations);
+    expect(written.usedFallback).toBe(true);
+
+    // One first-failure warning plus one end-of-run warning, not one per
+    // allocation.
+    expect(warnings.filter((line) => line.includes('allocator failed'))).toHaveLength(1);
+    expect(
+      warnings.some((line) => line.includes('WARNING') && line.includes('fell back to FCFS')),
+    ).toBe(true);
+  } finally {
+    warnSpy.mockRestore();
+  }
+});
+
 test('runs Python strategies through the sidecar', async () => {
   const outDir = await mkdtemp(path.join(tmpdir(), 'hive-python-'));
   const summary = await runHeadless({

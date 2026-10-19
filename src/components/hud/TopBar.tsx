@@ -26,6 +26,7 @@ export function TopBar({ state }: TopBarProps) {
   const strategy = useStore(state, (s) => s.strategy);
   const simTimeMs = useStore(state, (s) => s.simTimeMs);
   const pythonOnline = useStore(state, (s) => s.pythonOnline);
+  const error = useStore(state, (s) => s.error);
 
   return (
     <header className="hud-panel hud-topbar">
@@ -37,6 +38,11 @@ export function TopBar({ state }: TopBarProps) {
       >
         {pythonOnline ? 'Python online' : 'Python offline — FCFS only'}
       </span>
+      {error !== null ? (
+        <span className="hud-error" role="alert" title={error}>
+          {error}
+        </span>
+      ) : null}
       <span className="hud-clock">t+ {formatSimClock(simTimeMs)}</span>
     </header>
   );

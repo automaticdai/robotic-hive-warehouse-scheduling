@@ -97,7 +97,7 @@ const rawConfigSchema = z.object({
       replenishDelayMs: positiveInt.default(5000),
     })
     .default({ count: 6000, replenishDelayMs: 5000 }),
-  stations: z.array(stationSchema).default(defaultStations.map((station) => ({
+  stations: z.array(stationSchema).min(1).default(defaultStations.map((station) => ({
     ...station,
     docks: station.docks.map(([x, y]) => [x, y] as [number, number]),
   }))),
