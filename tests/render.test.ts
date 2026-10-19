@@ -145,3 +145,17 @@ test('snapshot source samples nothing when empty', () => {
   const source = new SnapshotSource();
   expect(source.sample(0)).toBeNull();
 });
+
+test('snapshot source clear resets both snapshots', () => {
+  const source = new SnapshotSource();
+  source.push(snapshotAt(1000), 1000);
+  source.push(snapshotAt(1050), 1050);
+  expect(source.latest()).not.toBeNull();
+
+  source.clear();
+
+  expect(source.latest()).toBeNull();
+  expect(source.previous()).toBeNull();
+  expect(source.intervalMs()).toBe(0);
+  expect(source.sample(1050)).toBeNull();
+});

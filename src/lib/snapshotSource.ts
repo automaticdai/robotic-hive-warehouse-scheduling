@@ -26,6 +26,14 @@ export class SnapshotSource {
     this.currentAtMs = receivedAtMs;
   }
 
+  /** Drops both buffered snapshots, for example before a scenario restart. */
+  clear(): void {
+    this.currentSnapshot = null;
+    this.previousSnapshot = null;
+    this.currentAtMs = null;
+    this.previousAtMs = null;
+  }
+
   latest(): Snapshot | null {
     return this.currentSnapshot;
   }

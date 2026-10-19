@@ -11,6 +11,8 @@ export interface HudClient {
   step(): void;
   setSpeed(speed: number): void;
   selectStrategy(strategy: string): void;
+  inspect?(target: InspectionTarget | null): void;
+  restart?(config: SimConfig): void;
 }
 
 export interface HudScenario {
@@ -41,7 +43,7 @@ export interface HudState extends Required<HudData> {
   setSelected(target: InspectionTarget | null): void;
   setStrategy(strategy: string): void;
   setScenario(scenarioName: string): void;
-  applyInspection(detail: InspectionDetail): void;
+  applyInspection(detail: InspectionDetail | null): void;
 }
 
 /** Number of throughput samples kept for the sparkline. */
@@ -74,11 +76,27 @@ function createHudState(initial: HudData): StateCreator<HudState> {
           status.metrics.throughputPerHour,
         ),
       })),
-    setSelected: (target) =>
-      set(target === null ? { selected: null, inspection: null } : { selected: target }),
+    setSelected: (target) => set({ selected: target, inspection: null }),
     setStrategy: (strategy) => set({ strategy }),
     setScenario: (scenarioName) => set({ scenarioName }),
-    applyInspection: (detail) => set({ inspection: detail }),
+    applyInspection: (detail) =>
+      set((state) => {
+        if (detail === null) {
+          if (state.inspection === null) return state;
+          return { inspection: null };
+        }
+        // Drop orphan details and details for a target that is no longer (or
+        // was never) selected, so a late worker reply cannot overwrite the
+        // inspector after the selection changed.
+        if (
+          state.selected === null ||
+          state.selected.type !== detail.type ||
+          state.selected.id !== detail.id
+        ) {
+          return state;
+        }
+        return { inspection: detail };
+      }),
   });
 }
 

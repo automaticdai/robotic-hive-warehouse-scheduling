@@ -25,12 +25,18 @@ export function TopBar({ state }: TopBarProps) {
   const scenarioName = useStore(state, (s) => s.scenarioName);
   const strategy = useStore(state, (s) => s.strategy);
   const simTimeMs = useStore(state, (s) => s.simTimeMs);
+  const pythonOnline = useStore(state, (s) => s.pythonOnline);
 
   return (
     <header className="hud-panel hud-topbar">
       <span className="hud-brand">HIVE-1</span>
       <span className="hud-topbar-item">{scenarioName || '—'}</span>
       <span className="hud-topbar-item">{strategy}</span>
+      <span
+        className={`hud-python ${pythonOnline ? 'hud-python-online' : 'hud-python-offline'}`}
+      >
+        {pythonOnline ? 'Python online' : 'Python offline — FCFS only'}
+      </span>
       <span className="hud-clock">t+ {formatSimClock(simTimeMs)}</span>
     </header>
   );

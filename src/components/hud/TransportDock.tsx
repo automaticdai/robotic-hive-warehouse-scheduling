@@ -24,6 +24,8 @@ export function TransportDock({ client, state }: TransportDockProps) {
   const speed = useStore(state, (s) => s.speed);
   const strategies = useStore(state, (s) => s.strategies);
   const strategy = useStore(state, (s) => s.strategy);
+  const scenarios = useStore(state, (s) => s.scenarios);
+  const scenarioName = useStore(state, (s) => s.scenarioName);
 
   return (
     <div className="hud-panel hud-dock">
@@ -67,6 +69,31 @@ export function TransportDock({ client, state }: TransportDockProps) {
               {option}
             </option>
           ))}
+        </select>
+      </label>
+      <label className="hud-control">
+        <span>Scenario</span>
+        <select
+          aria-label="Scenario"
+          value={scenarioName}
+          disabled={scenarios.length === 0}
+          onChange={(event) => {
+            const next = event.target.value;
+            const scenario = state.getState().scenarios.find((entry) => entry.name === next);
+            if (scenario === undefined) return;
+            client.restart?.(scenario.config);
+            state.getState().setScenario(next);
+          }}
+        >
+          {scenarios.length === 0 ? (
+            <option value={scenarioName}>{scenarioName || 'default'}</option>
+          ) : (
+            scenarios.map((scenario) => (
+              <option key={scenario.name} value={scenario.name}>
+                {scenario.name}
+              </option>
+            ))
+          )}
         </select>
       </label>
       <ul className="hud-legend" aria-label="Robot state legend">

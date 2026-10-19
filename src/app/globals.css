@@ -132,6 +132,22 @@ a {
   color: #e8a33d;
 }
 
+.hud-python {
+  padding: 1px 7px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+}
+
+.hud-python-online {
+  color: #5fbf8a;
+}
+
+.hud-python-offline {
+  color: #c9705a;
+}
+
 .hud-metrics {
   top: 16px;
   left: 16px;
