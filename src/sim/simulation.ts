@@ -10,7 +10,7 @@ import type {
 } from './allocation';
 import type { Cell, SimConfig } from './config';
 import { percentile } from './metrics';
-import { findPath, manhattan, updateMovement } from './movement';
+import { findPath, manhattan, NEIGHBOUR_OFFSETS, updateMovement } from './movement';
 import type {
   Job,
   MetricsSample,
@@ -43,14 +43,6 @@ export interface Snapshot {
 
 /** Sim-time spacing between time-series samples. */
 const SAMPLE_INTERVAL_MS = 1_000;
-
-/** Stepping order used when a deposited robot leaves its dock cell. */
-const EGRESS_OFFSETS: ReadonlyArray<readonly [number, number]> = [
-  [0, -1],
-  [1, 0],
-  [0, 1],
-  [-1, 0],
-];
 
 /** Numeric robot-state encoding used by snapshot consumers. */
 const ROBOT_STATE_CODE: Record<RobotStatus, number> = {
@@ -621,14 +613,22 @@ export class Simulation {
     return true;
   }
 
-  /** Moves a just-serviced robot to the first free N/E/S/W neighbour, if any. */
+  /**
+   * Moves a just-serviced robot to the first free N/E/S/W neighbour, if any.
+   * Sibling dock cells are skipped: stepping onto another dock of the same
+   * station would trade one blocked dock for another.
+   */
   private stepOffDock(robot: Robot): void {
     const occupied = this.robotOccupancy(robot);
+    const dockCells = new Set(
+      this.world.stations.flatMap((station) => station.docks.map((dock) => cellKey(dock))),
+    );
 
     const { width, height } = this.world.config.grid;
-    for (const [dx, dy] of EGRESS_OFFSETS) {
+    for (const [dx, dy] of NEIGHBOUR_OFFSETS) {
       const cell = { x: robot.cell.x + dx, y: robot.cell.y + dy };
       if (cell.x < 0 || cell.x >= width || cell.y < 0 || cell.y >= height) continue;
+      if (dockCells.has(cellKey(cell))) continue;
       if (occupied.has(cellKey(cell))) continue;
       robot.cell = cell;
       return;
@@ -667,6 +667,11 @@ export class Simulation {
       }
     }
 
+    // Degraded fallback: on a very small or very crowded grid there may be no
+    // free cell outside the dock apron. Parking inside the apron is preferred
+    // to leaving the robot parked on the station approach, so the fallback pool
+    // is used explicitly rather than silently routing into the apron. When
+    // even the fallback is empty the robot stays where it is.
     const pool = preferred.length > 0 ? preferred : fallback;
     if (pool.length === 0) return;
 

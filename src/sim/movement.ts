@@ -8,7 +8,7 @@ export function manhattan(a: Cell, b: Cell): number {
 }
 
 /** Neighbour offsets in deterministic scan order: N, E, S, W. */
-const NEIGHBOUR_OFFSETS: ReadonlyArray<readonly [number, number]> = [
+export const NEIGHBOUR_OFFSETS: ReadonlyArray<readonly [number, number]> = [
   [0, -1],
   [1, 0],
   [0, 1],
@@ -375,10 +375,14 @@ function findSidestepper(
   candidates: readonly Robot[],
   grid: GridConfig,
   occupancy: ReadonlyMap<string, string>,
+  relocatedThisTick: ReadonlySet<string>,
 ): { robot: Robot; cell: Cell } | undefined {
   for (let index = candidates.length - 1; index >= 0; index--) {
     const robot = candidates[index]!;
     if (robot.status === 'at_station') continue;
+    // A robot already nudged this phase must not move a second cell in the
+    // same 100 ms tick.
+    if (relocatedThisTick.has(robot.id)) continue;
     if (!isIdleBlocker(robot) && robot.path.length === 0) continue;
 
     const cell = findFreeNeighbour(robot.cell, grid, occupancy);
@@ -407,6 +411,10 @@ export function updateMovement(world: World): MovementStats {
   const robotsById = new Map(world.robots.map((robot) => [robot.id, robot]));
   const orderedRobots = [...world.robots].sort(comparePriority);
   const blockedThisTick: Robot[] = [];
+  // Robots relocated by a nudge or a recovery sidestep in this phase. They must
+  // not be moved again until the next tick, so every robot moves at most one
+  // cell per 100 ms movement phase.
+  const relocatedThisTick = new Set<string>();
 
   for (const robot of orderedRobots) {
     if (robot.status === 'at_station') continue;
@@ -421,8 +429,13 @@ export function updateMovement(world: World): MovementStats {
       const blockerId = occupancy.get(cellKey(next));
       if (blockerId !== undefined && blockerId !== robot.id) {
         const blocker = robotsById.get(blockerId);
-        if (blocker !== undefined && isIdleBlocker(blocker)) {
+        if (
+          blocker !== undefined &&
+          isIdleBlocker(blocker) &&
+          !relocatedThisTick.has(blocker.id)
+        ) {
           if (yieldIdleBlocker(blocker, robot.cell, grid, occupancy)) {
+            relocatedThisTick.add(blocker.id);
             stats.moves += 1;
           }
         }
@@ -509,8 +522,8 @@ export function updateMovement(world: World): MovementStats {
     // member is boxed in.
     const cycleCandidates = members.filter((robot) => cycleMemberIds.has(robot.id));
     const choice =
-      findSidestepper(cycleCandidates, grid, occupancy) ??
-      findSidestepper(members, grid, occupancy);
+      findSidestepper(cycleCandidates, grid, occupancy, relocatedThisTick) ??
+      findSidestepper(members, grid, occupancy, relocatedThisTick);
     if (choice === undefined) continue;
 
     const { robot: sidestepper, cell: sidestepCell } = choice;
@@ -519,7 +532,12 @@ export function updateMovement(world: World): MovementStats {
     occupancy.delete(vacatedKey);
     sidestepper.cell = { x: sidestepCell.x, y: sidestepCell.y };
     occupancy.set(cellKey(sidestepper.cell), sidestepper.id);
+    relocatedThisTick.add(sidestepper.id);
     stats.moves += 1;
+    // The metric counts detected wait cycles handled in this phase. It also
+    // increments when the resolver only nudges a parked idle robot, so the
+    // numbers stay comparable with earlier baselines; it is not a count of
+    // deadlocks that involved a moving robot.
     stats.deadlockEvents += 1;
 
     // A parked idle robot has no route to resume: nudge it and leave it idle so

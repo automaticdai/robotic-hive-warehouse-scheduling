@@ -13,7 +13,7 @@ baseline and works with no Python installed.
 ## Prerequisites
 
 - **Node.js 20+** (developed and tested on Node 22).
-- **Python 3.12** for Python strategies and the sidecar. The sidecar uses the Python
+- **Python 3.10 or newer (tested on 3.12)** for Python strategies and the sidecar. The sidecar uses the Python
   standard library only, so no runtime packages are required.
 - A modern browser with WebGL for the live view.
 
@@ -110,10 +110,11 @@ Add **one file** under `python/strategies/`. The file name is the module name; t
 qualified strategy id is `python:<module>`, for example `python:nearest_robot` for
 `python/strategies/nearest_robot.py`.
 
-The contract enforced by `python/hive_sim/runner.py`:
+The strategy contract:
 
-- The module name must match `[A-Za-z][A-Za-z0-9_]*`, must not start with `_`, and must
-  not contain path separators.
+- The module name must match `[A-Za-z][A-Za-z0-9_]*` (validated in
+  `src/lib/allocator.ts`); `python/hive_sim/runner.py` also rejects an empty name, a
+  leading `_`, or path separators.
 - The module must define a callable `Strategy` class. It is instantiated once per session
   as `Strategy(config)`, where `config` is the object sent in the `POST /sessions` body
   (the bundled TypeScript client sends `{}`).
@@ -203,7 +204,7 @@ stdout. All other endpoints exchange JSON:
 | `GET /health` | `{status, session}` health and latest session id. |
 | `GET /strategies` | `{strategies: [{name, description}]}` from `python/strategies/`. |
 | `POST /sessions` | `{strategy, config}` → `{sessionId, strategy}`; loads a fresh instance. |
-| `POST /sessions/{id}/allocate` | `{observation}` → `{assignments, diagnostics}`. |
+| `POST /sessions/{id}/allocate` | Raw observation object → `{assignments, diagnostics}`. |
 | `POST /sessions/{id}/select` | `{strategy}` → hot-swap to a fresh module instance. |
 | `POST /sessions/{id}/reset` | Calls the strategy's `reset()`. |
 | `DELETE /sessions/{id}` | Drops the session. |

@@ -88,7 +88,8 @@ Key rule: **the simulation core owns the truth, the view only renders snapshots.
 - Coordinates are 0-based `(x, y)`. Stations sit outside the perimeter; each station config lists one or more **dock cells** inside the grid at the perimeter edge. Dock cells are ordinary traversable cells with single-robot occupancy and may be used for passing as well as delivery.
 - Each station has:
   - a queue capacity (default 8 pods), counting pods waiting **and** the pod in service,
-  - a service time (default 20 s),
+  - a service time (default 1 s; the original 20 s default was infeasible at
+    the approved 1,600 orders/h demand and was lowered by controller ruling),
   - an abstract pod queue (queued pods do not occupy grid cells).
 - **Handoff:** a loaded robot arrives at a free dock cell. If the station queue has room, it deposits the pod immediately and becomes idle at that cell; the trip job completes at deposit. If the queue is full, the robot waits at or near the dock (state `at_station`, not assignable) until a slot opens. Multiple docks allow parallel handoffs.
 - Service: a queued pod waits, is served for `serviceTimeMs`, then is absorbed; the slot frees. A replacement pod enters a free storage cell after a short replenishment delay so inventory stays roughly constant.
@@ -246,9 +247,9 @@ JSON, validated by a shared schema (zod). Example:
   "robots": 2000,
   "pods": { "count": 6000, "replenishDelayMs": 5000 },
   "stations": [
-    { "id": "S-1", "docks": [[0, 25], [0, 26]], "queueCapacity": 8, "serviceTimeMs": 20000 },
-    { "id": "S-2", "docks": [[99, 50], [99, 51]], "queueCapacity": 8, "serviceTimeMs": 20000 },
-    { "id": "S-3", "docks": [[0, 75], [0, 76]], "queueCapacity": 8, "serviceTimeMs": 20000 }
+    { "id": "S-1", "docks": [[0, 25], [0, 26]], "queueCapacity": 8, "serviceTimeMs": 1000 },
+    { "id": "S-2", "docks": [[99, 50], [99, 51]], "queueCapacity": 8, "serviceTimeMs": 1000 },
+    { "id": "S-3", "docks": [[0, 75], [0, 76]], "queueCapacity": 8, "serviceTimeMs": 1000 }
   ],
   "orders": {
     "arrivalRatePerHour": 1600,

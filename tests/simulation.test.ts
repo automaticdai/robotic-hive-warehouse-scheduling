@@ -1,5 +1,6 @@
 import { parseConfig } from '@/sim/config';
 import { FcfsAllocator } from '@/sim/fcfs';
+import { manhattan } from '@/sim/movement';
 import { Simulation } from '@/sim/simulation';
 
 function makeSim() {
@@ -129,6 +130,8 @@ test('robot waits at a full dock, then deposits when a slot frees', () => {
   // route (status moving_empty) instead of idling on the dock cell forever.
   expect(['idle', 'moving_empty']).toContain(robot.status);
   expect(robot.jobId).toBeNull();
+  // The pre-deposit dock cell must actually be vacated.
+  for (const dock of station.docks) expect(robot.cell).not.toEqual(dock);
   expect(sim.world.jobs.get(jobId)!.status).toBe('complete');
   expect(station.queue).toHaveLength(1);
 });
@@ -241,8 +244,39 @@ test('a carrying robot deposits at any dock of its assigned station', () => {
   // cell; either way it no longer blocks the dock.
   expect(['idle', 'moving_empty']).toContain(robot.status);
   expect(robot.jobId).toBeNull();
+  for (const dock of station.docks) expect(robot.cell).not.toEqual(dock);
   expect(station.queue).toHaveLength(1);
   expect(station.queue[0]!.podId).toBe('P-00001');
+});
+
+test('parking uses the in-apron fallback when no outside-apron cell is free', () => {
+  // The apron radius is max(2, min(width, height) / 8) = 2 here, and every cell
+  // in a 3x3 grid is within Manhattan distance 2 of the central dock, so the
+  // preferred pool is empty. The documented fallback must still assign a
+  // parking route rather than leaving the serviced robot parked on approach.
+  const sim = new Simulation(
+    parseConfig({
+      grid: { width: 3, height: 3 },
+      robots: 1,
+      pods: { count: 1 },
+      stations: [{ id: 'S-1', docks: [[1, 1]], queueCapacity: 2, serviceTimeMs: 1000 }],
+      seed: 3,
+    }),
+  );
+  const station = sim.world.stations[0];
+  const jobId = addJob(sim);
+  const robot = sim.world.robots[0];
+  robot.cell = { x: 1, y: 1 };
+  robot.jobId = jobId;
+  robot.carrying = true;
+  robot.status = 'moving_loaded';
+  robot.path = [];
+
+  sim.tick();
+
+  expect(robot.status).toBe('moving_empty');
+  expect(robot.path.length).toBeGreaterThan(0);
+  expect(manhattan(robot.path.at(-1)!, station.docks[0]!)).toBeLessThanOrEqual(2);
 });
 
 test('order completion preserves the full packing duration', () => {

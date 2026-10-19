@@ -312,6 +312,42 @@ test('a moving robot pushes a parked idle blocker aside and advances', () => {
   );
 });
 
+test('an idle robot nudged aside is not moved a second time in the same tick', () => {
+  // X is parked at (1,1). A pushes X north to (1,0) and advances. B then wants
+  // (1,0): X is still idle and unassigned, but it was already relocated this
+  // phase, so B must wait instead of shoving X on to (0,0).
+  const world = movementWorld(3);
+  const [idle, first, second] = world.robots;
+
+  idle.cell = { x: 1, y: 1 };
+  idle.path = [];
+  idle.status = 'idle';
+  idle.jobId = null;
+  idle.assignedAtMs = 100;
+
+  first.cell = { x: 0, y: 1 };
+  first.path = [{ x: 1, y: 1 }];
+  first.status = 'moving_empty';
+  first.jobId = 'J-0000001';
+  first.assignedAtMs = 0;
+
+  second.cell = { x: 2, y: 0 };
+  second.path = [{ x: 1, y: 0 }];
+  second.status = 'moving_empty';
+  second.jobId = 'J-0000002';
+  second.assignedAtMs = 10;
+
+  const stats = updateMovement(world);
+
+  expect(stats.moves).toBe(2);
+  expect(stats.blocks).toBe(1);
+  expect(idle.cell).toEqual({ x: 1, y: 0 });
+  expect(idle.status).toBe('idle');
+  expect(idle.jobId).toBeNull();
+  expect(first.cell).toEqual({ x: 1, y: 1 });
+  expect(second.cell).toEqual({ x: 2, y: 0 });
+});
+
 test('a boxed-in idle robot is not moved and the mover waits', () => {
   const world = movementWorld(5, 3, 3);
   const [mover, idle, north, east, south] = world.robots;

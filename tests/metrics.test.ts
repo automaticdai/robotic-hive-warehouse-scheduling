@@ -156,13 +156,34 @@ test('rolling throughput counts only completions within the last hour', () => {
 test('utilisation accumulates robot state time at tick granularity', () => {
   const sim = makeMetricsSim({}, 2);
   // An unassigned robot with an empty path is parked and returns to idle at
-  // the end of the movement phase, so keep this one assigned to hold the
-  // moving_empty state across all ten ticks.
+  // the end of the movement phase, so keep this one assigned to a real job to
+  // hold the moving_empty state across all ten ticks.
   const robot = sim.world.robots[0]!;
+  const other = sim.world.robots[1]!;
+  const jobId = 'J-0000001';
+  sim.world.jobs.set(jobId, {
+    id: jobId,
+    orderId: 'O-000001',
+    podId: 'P-00001',
+    pickup: { x: 5, y: 5 },
+    candidateStations: ['S-1'],
+    dependsOn: [],
+    priority: 0,
+    createdAtMs: 0,
+    status: 'assigned',
+    stationId: 'S-1',
+    robotId: robot.id,
+    completedAtMs: null,
+  });
   robot.cell = { x: 0, y: 0 };
   robot.path = [{ x: 1, y: 0 }];
-  robot.jobId = 'J-manual';
+  robot.jobId = jobId;
   robot.status = 'moving_empty';
+  // Keep the second robot away from the first robot's route regardless of the
+  // seeded spawn layout.
+  other.cell = { x: 9, y: 9 };
+  other.path = [];
+  other.status = 'idle';
 
   for (let i = 0; i < 10; i++) sim.tick();
 
