@@ -103,7 +103,7 @@ test('renders achieved speed distinctly and warns when it lags the target', () =
 
   const achieved = screen.getByLabelText('Achieved speed');
   expect(achieved).toHaveTextContent('achieved 1.2×');
-  expect(achieved).toHaveClass('hud-achieved-lagging');
+  expect(achieved).toHaveClass('is-lagging');
   expect(screen.getByLabelText('Speed')).toHaveValue('4');
 });
 

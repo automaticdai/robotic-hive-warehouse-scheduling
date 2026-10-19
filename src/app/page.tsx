@@ -129,15 +129,23 @@ export default function Page() {
 
   return (
     <main>
-      <h1 className="hud-page-title">Hive Warehouse Simulator</h1>
-      {config !== null ? (
-        <HiveCanvas
-          source={source}
-          config={config}
-          onSelect={(target) => useHudStore.getState().setSelected(target)}
-        />
-      ) : null}
-      <Hud client={hudClient} state={useHudStore} />
+      <Hud
+        client={hudClient}
+        state={useHudStore}
+        source={source}
+        stage={
+          config !== null ? (
+            <HiveCanvas
+              source={source}
+              config={config}
+              state={useHudStore}
+              onSelect={(target) => useHudStore.getState().setSelected(target)}
+            />
+          ) : (
+            <p className="stage-placeholder">Loading the hive…</p>
+          )
+        }
+      />
     </main>
   );
 }

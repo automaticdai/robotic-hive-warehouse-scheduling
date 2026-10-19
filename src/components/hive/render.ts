@@ -11,13 +11,41 @@ export const ROBOT_STATUS_ORDER: readonly RobotStatus[] = [
   'at_station',
 ];
 
+/**
+ * Robot state palette. The four working states are validated for adjacent
+ * CVD separation on the concrete floor; idle is off-white, so parked robots
+ * read as robots against the slate pods without competing with traffic.
+ */
 const STATE_COLORS: Record<RobotStatus, string> = {
-  idle: '#5f7d8c',
-  moving_empty: '#e8a33d',
-  moving_loaded: '#d8e8e2',
-  waiting: '#c0442f',
-  at_station: '#9b6bd6',
+  idle: '#f4f5f1',
+  moving_empty: '#2f6fd1',
+  moving_loaded: '#0f9e74',
+  waiting: '#e0542e',
+  at_station: '#7b4fd0',
 };
+
+/** Human-readable robot state names, shared by the HUD legend and inspector. */
+export const STATE_LABELS: Record<RobotStatus, string> = {
+  idle: 'Idle',
+  moving_empty: 'To pickup',
+  moving_loaded: 'Carrying pod',
+  waiting: 'Blocked',
+  at_station: 'Queued at port',
+};
+
+/** Floor-plan palette shared by the scene components. */
+export const FLOOR_PALETTE = {
+  background: '#e7e8e3',
+  floor: '#d9dbd5',
+  storage: '#c3c8c5',
+  gridLine: '#59646a',
+  podStored: '#66757a',
+  podReserved: '#f2b705',
+  carriedPod: '#3d4a4f',
+  safety: '#f2c230',
+  ink: '#1c2427',
+  dock: '#1c2427',
+} as const;
 
 export interface WorldPosition {
   x: number;
@@ -129,4 +157,63 @@ export function stationWorldPosition(
   return nearest.axis === 'x'
     ? { x: base.x + offset, z: base.z }
     : { x: base.x, z: base.z + offset };
+}
+
+/** A cell-aligned rectangle on the floor, in grid cells (x/y inclusive start). */
+export interface FloorRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * The hatched port zone in front of a station: the bounding box of its docks,
+ * grown by `clearance - 1` cells and clamped to the grid. It is exactly the
+ * area pods are kept out of for a station on a grid edge.
+ */
+export function portZoneRect(
+  station: StationConfig,
+  grid: GridConfig,
+  clearance: number,
+): FloorRect {
+  const grow = Math.max(0, clearance - 1);
+  const xs = station.docks.map((dock) => dock.x);
+  const ys = station.docks.map((dock) => dock.y);
+  const x0 = Math.max(0, Math.min(...xs) - grow);
+  const y0 = Math.max(0, Math.min(...ys) - grow);
+  const x1 = Math.min(grid.width - 1, Math.max(...xs) + grow);
+  const y1 = Math.min(grid.height - 1, Math.max(...ys) + grow);
+  return { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 };
+}
+
+/** World-space centre and size of a cell rectangle. */
+export function rectToWorld(
+  rect: FloorRect,
+  grid: GridConfig,
+): { x: number; z: number; width: number; depth: number } {
+  return {
+    x: rect.x + rect.width / 2 - grid.width / 2,
+    z: rect.y + rect.height / 2 - grid.height / 2,
+    width: rect.width,
+    depth: rect.height,
+  };
+}
+
+/** Outward unit direction from the grid edge nearest a station's docks. */
+export function stationOutward(
+  station: StationConfig,
+  grid: GridConfig,
+): { x: number; z: number } {
+  const dockCount = station.docks.length;
+  const cx = station.docks.reduce((sum, dock) => sum + dock.x, 0) / dockCount;
+  const cy = station.docks.reduce((sum, dock) => sum + dock.y, 0) / dockCount;
+  const edges = [
+    { distance: cx, x: -1, z: 0 },
+    { distance: grid.width - 1 - cx, x: 1, z: 0 },
+    { distance: cy, x: 0, z: -1 },
+    { distance: grid.height - 1 - cy, x: 0, z: 1 },
+  ];
+  const nearest = edges.reduce((best, edge) => (edge.distance < best.distance ? edge : best));
+  return { x: nearest.x, z: nearest.z };
 }

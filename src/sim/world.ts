@@ -1,5 +1,6 @@
 import type { Cell, SimConfig } from './config';
-import { createRng } from './rng';
+import { apronMask, podSlots, storageCells } from './layout';
+import { createRng, type Rng } from './rng';
 import type { Pod, Robot, Station, World } from './types';
 
 /** Stable string key for a grid cell. */
@@ -7,9 +8,23 @@ export function cellKey(cell: Cell): string {
   return `${cell.x},${cell.y}`;
 }
 
+/** In-place Fisher–Yates shuffle driven by the world RNG. */
+function shuffle<T>(items: T[], rng: Rng): T[] {
+  for (let index = items.length - 1; index > 0; index--) {
+    const swapIndex = rng.int(index + 1);
+    const current = items[index]!;
+    items[index] = items[swapIndex]!;
+    items[swapIndex] = current;
+  }
+  return items;
+}
+
 /**
- * Builds a deterministic world for a config seed. Robot and pod start cells are
- * drawn from a seeded shuffle of the grid, so each set occupies distinct cells.
+ * Builds a deterministic world for a config seed. Each pod gets a fixed home
+ * slot in a compact block at the centre of the storage area (clear of station
+ * ports); it is stored there, fetched from there, and returns there after
+ * service. Robots start on a seeded shuffle of cells outside the station
+ * aprons.
  */
 export function createWorld(config: SimConfig): World {
   const { width, height } = config.grid;
@@ -24,22 +39,35 @@ export function createWorld(config: SimConfig): World {
 
   const rng = createRng(config.seed);
 
-  const cellIndices = Array.from({ length: totalCells }, (_, index) => index);
-  for (let index = cellIndices.length - 1; index > 0; index--) {
-    const swapIndex = rng.int(index + 1);
-    const current = cellIndices[index]!;
-    cellIndices[index] = cellIndices[swapIndex]!;
-    cellIndices[swapIndex] = current;
+  const available = storageCells(config).length;
+  if (config.pods.count > available) {
+    throw new Error(
+      `pods.count (${config.pods.count}) exceeds the ${available} storage slots clear of station ports`,
+    );
   }
+  const podCells = podSlots(config, config.pods.count);
 
-  const cellAt = (index: number): Cell => ({
-    x: index % width,
-    y: Math.floor(index / width),
-  });
+  // Robots run on top of the grid and drive over stored pods, so they start
+  // spread across the whole hive (pod slots included). Station aprons are
+  // filled only when the rest of the grid is full, and dock cells last.
+  const dockCells = new Set(config.stations.flatMap((station) => station.docks.map(cellKey)));
+  const apron = apronMask(config);
+  const open: Cell[] = [];
+  const nearPorts: Cell[] = [];
+  const docks: Cell[] = [];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const cell = { x, y };
+      if (dockCells.has(cellKey(cell))) docks.push(cell);
+      else if (apron[y * width + x] === 1) nearPorts.push(cell);
+      else open.push(cell);
+    }
+  }
+  const robotCells = [...shuffle(open, rng), ...shuffle(nearPorts, rng), ...docks];
 
   const robots: Robot[] = Array.from({ length: config.robots }, (_, index) => ({
     id: `R-${String(index + 1).padStart(4, '0')}`,
-    cell: cellAt(cellIndices[index]!),
+    cell: robotCells[index]!,
     status: 'idle',
     battery: 1,
     jobId: null,
@@ -49,9 +77,9 @@ export function createWorld(config: SimConfig): World {
     blockedTicks: 0,
   }));
 
-  const pods: Pod[] = Array.from({ length: config.pods.count }, (_, index) => ({
+  const pods: Pod[] = podCells.map((cell, index) => ({
     id: `P-${String(index + 1).padStart(5, '0')}`,
-    cell: cellAt(cellIndices[config.robots + index]!),
+    cell,
     available: true,
     reservedByJobId: null,
     replenishAtMs: null,

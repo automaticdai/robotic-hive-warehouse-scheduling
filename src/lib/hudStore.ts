@@ -17,6 +17,16 @@ export interface HudClient {
   restartCurrent?(): void;
 }
 
+/** Camera preset for the hive view. */
+export type HudView = 'plan' | 'angled';
+
+/** One point of the HUD time series, appended on every status/metrics update. */
+export interface HudSample {
+  simTimeMs: number;
+  throughputPerHour: number;
+  jobsPending: number;
+}
+
 export interface HudScenario {
   name: string;
   config: SimConfig;
@@ -40,6 +50,8 @@ export interface HudData {
   inspection: InspectionDetail | null;
   error: string | null;
   throughputHistory?: number[];
+  history?: HudSample[];
+  view?: HudView;
 }
 
 export interface HudState extends Required<HudData> {
@@ -49,6 +61,7 @@ export interface HudState extends Required<HudData> {
   setStrategy(strategy: string): void;
   setScenario(scenarioName: string): void;
   applyInspection(detail: InspectionDetail | null): void;
+  setView(view: HudView): void;
 }
 
 /** Number of throughput samples kept for the sparkline. */
@@ -58,15 +71,41 @@ function appendThroughput(history: number[], value: number): number[] {
   return [...history, value].slice(-THROUGHPUT_HISTORY_LIMIT);
 }
 
+/** Number of time-series samples kept for the HUD charts. */
+export const HISTORY_LIMIT = 240;
+
+/**
+ * Appends a sample, replacing the last one when sim time has not advanced
+ * (status and metrics events often report the same instant). A sample from
+ * before the last one means the run restarted, so the series starts over.
+ */
+function appendSample(history: HudSample[], metrics: MetricsSummary): HudSample[] {
+  const sample: HudSample = {
+    simTimeMs: metrics.simTimeMs,
+    throughputPerHour: metrics.throughputPerHour,
+    jobsPending: metrics.jobsPending,
+  };
+  const last = history.at(-1);
+  if (last === undefined || sample.simTimeMs > last.simTimeMs) {
+    return [...history, sample].slice(-HISTORY_LIMIT);
+  }
+  if (sample.simTimeMs === last.simTimeMs) return [...history.slice(0, -1), sample];
+  return [sample];
+}
+
 function createHudState(initial: HudData): StateCreator<HudState> {
-  const { throughputHistory = [], ...data } = initial;
+  const { throughputHistory = [], history = [], view = 'plan', ...data } = initial;
   return (set) => ({
     ...data,
     throughputHistory,
+    history,
+    view,
+    setView: (next) => set({ view: next }),
     applyMetrics: (metrics) =>
       set((state) => ({
         metrics,
         throughputHistory: appendThroughput(state.throughputHistory, metrics.throughputPerHour),
+        history: appendSample(state.history, metrics),
       })),
     applyStatus: (status) =>
       set((state) => ({
@@ -84,6 +123,7 @@ function createHudState(initial: HudData): StateCreator<HudState> {
           state.throughputHistory,
           status.metrics.throughputPerHour,
         ),
+        history: appendSample(state.history, status.metrics),
       })),
     setSelected: (target) => set({ selected: target, inspection: null }),
     setStrategy: (strategy) => set({ strategy }),

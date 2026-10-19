@@ -48,6 +48,7 @@ test('a zero interarrival sample is clamped so generation always advances', () =
       grid: { width: 3, height: 3 },
       robots: 1,
       pods: { count: 1 },
+      layout: { portClearance: 0 },
       stations: [{ id: 'S-1', docks: [[0, 0]], queueCapacity: 1, serviceTimeMs: 1000 }],
       orders: { arrivalRatePerHour: 3600, linesPerOrder: { min: 1, max: 1 } },
       seed: 1,

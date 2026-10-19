@@ -22,9 +22,12 @@ import type {
   Station,
   World,
 } from './types';
+import { apronMask } from './layout';
 import { cellKey, createWorld } from './world';
+import { POD_STATE_CODE } from './types';
 
 export type { MetricsSample, MetricsSummary } from './types';
+export { POD_STATE_CODE } from './types';
 
 export interface Snapshot {
   timeMs: number;
@@ -36,7 +39,8 @@ export interface Snapshot {
     carrying: Uint8Array;
     battery: Float32Array;
   };
-  pods: { x: Float32Array; y: Float32Array; visible: Uint8Array };
+  /** `state` uses POD_STATE_CODE: stored, reserved (awaiting pickup), out. */
+  pods: { x: Float32Array; y: Float32Array; visible: Uint8Array; state: Uint8Array };
   stations: { id: string; queueLength: number; capacity: number; busy: boolean }[];
   metrics: MetricsSummary;
 }
@@ -87,6 +91,8 @@ export class Simulation {
 
   private readonly orderGenerator: OrderGenerator;
   private readonly podsById = new Map<string, Pod>();
+  /** Row-major no-parking flags around the docks; see `apronMask`. */
+  private readonly apron: Uint8Array;
   private readonly timeSeries: MetricsSample[] = [];
 
   private pendingAllocationSeq: number | null = null;
@@ -98,7 +104,6 @@ export class Simulation {
   private jobsCompleted = 0;
   private rejectedAssignments = 0;
   private deadlockEvents = 0;
-  private parkingSeq = 0;
 
   private readonly robotStateTimeMs: Record<RobotStatus, number> = {
     idle: 0,
@@ -114,6 +119,7 @@ export class Simulation {
 
   constructor(config: SimConfig) {
     this.world = createWorld(config);
+    this.apron = apronMask(config);
     for (const pod of this.world.pods) this.podsById.set(pod.id, pod);
     this.orderGenerator = new OrderGenerator(this.world, config.orders, this.world.rng);
 
@@ -283,6 +289,7 @@ export class Simulation {
     this.replenishPods();
     this.releaseDependentJobs();
     this.retryDeposits();
+    this.clearAprons();
 
     const movement = updateMovement(this.world);
     this.deadlockEvents += movement.deadlockEvents;
@@ -333,18 +340,24 @@ export class Simulation {
     const podX = new Float32Array(pods.length);
     const podY = new Float32Array(pods.length);
     const visible = new Uint8Array(pods.length);
+    const podState = new Uint8Array(pods.length);
     for (let index = 0; index < pods.length; index++) {
       const pod = pods[index]!;
       podX[index] = pod.cell.x;
       podY[index] = pod.cell.y;
       visible[index] = pod.available ? 1 : 0;
+      podState[index] = !pod.available
+        ? POD_STATE_CODE.out
+        : pod.reservedByJobId !== null
+          ? POD_STATE_CODE.reserved
+          : POD_STATE_CODE.stored;
     }
 
     return {
       timeMs: this.world.simTimeMs,
       robotIds: robots.map((robot) => robot.id),
       robots: { x, y, state, carrying, battery },
-      pods: { x: podX, y: podY, visible },
+      pods: { x: podX, y: podY, visible, state: podState },
       stations: this.world.stations.map((station) => ({
         id: station.id,
         queueLength: station.queue.length,
@@ -420,41 +433,19 @@ export class Simulation {
     }
   }
 
+  /**
+   * Returns serviced pods to storage once the replenish delay has elapsed.
+   * A pod's cell is its fixed home slot, so it reappears exactly where it was
+   * fetched from; slots are unique, and robots drive over stored pods, so the
+   * slot is always free to take it back.
+   */
   private replenishPods(): void {
     const now = this.world.simTimeMs;
-    const pending: Pod[] = [];
     for (const pod of this.world.pods) {
-      if (pod.replenishAtMs !== null && pod.replenishAtMs <= now) pending.push(pod);
-    }
-    if (pending.length === 0) return;
-
-    const robotCells = new Set<string>();
-    for (const robot of this.world.robots) robotCells.add(cellKey(robot.cell));
-
-    const visibleCells = new Set<string>();
-    for (const pod of this.world.pods) {
-      if (pod.available) visibleCells.add(cellKey(pod.cell));
-    }
-
-    const { width, height } = this.world.config.grid;
-    for (const pod of pending) {
-      const free: Cell[] = [];
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const key = `${x},${y}`;
-          if (robotCells.has(key) || visibleCells.has(key)) continue;
-          free.push({ x, y });
-        }
-      }
-      // No free cell: leave the pod pending and retry on the next tick.
-      if (free.length === 0) continue;
-
-      const cell = free[this.world.rng.int(free.length)]!;
-      pod.cell = cell;
+      if (pod.replenishAtMs === null || pod.replenishAtMs > now) continue;
       pod.available = true;
       pod.reservedByJobId = null;
       pod.replenishAtMs = null;
-      visibleCells.add(cellKey(cell));
     }
   }
 
@@ -636,17 +627,41 @@ export class Simulation {
   }
 
   /**
-   * Sends a serviced, unassigned robot to a free cell outside the dock apron.
-   * The route is planned with Manhattan A*, so the robot may pass through
-   * occupied cells in the plan; the movement tick blocks it and replans until
-   * the route is executed. Robots keep the `moving_empty` status while
-   * repositioning, so allocation only reuses them once they have parked.
+   * Gives every parked robot standing inside a station apron (on a dock, or
+   * nudged onto the approach by passing traffic) a route back out. Skipped
+   * when the grid has no free cell outside the aprons at all.
    */
-  private assignParkingRoute(robot: Robot): void {
+  private clearAprons(): void {
+    let occupied: Set<string> | null = null;
+    const { width } = this.world.config.grid;
+    for (const robot of this.world.robots) {
+      if (robot.status !== 'idle' || robot.jobId !== null || robot.carrying) continue;
+      if (robot.path.length > 0) continue;
+      if (this.apron[robot.cell.y * width + robot.cell.x] !== 1) continue;
+      occupied ??= this.robotOccupancy(null);
+      occupied.delete(cellKey(robot.cell));
+      this.assignParkingRoute(robot, occupied, false);
+      occupied.add(cellKey(robot.cell));
+    }
+  }
+
+  /**
+   * Sends an unassigned robot to a free cell outside the dock apron. The route
+   * is planned with Manhattan A*, so the robot may pass through occupied cells
+   * in the plan; the movement tick blocks it and replans until the route is
+   * executed. Robots keep the `moving_empty` status while repositioning, so
+   * allocation only reuses them once they have parked.
+   *
+   * With `allowApron`, a grid with no free cell outside the apron falls back
+   * to a cell inside it (a serviced robot is better off away from its dock);
+   * otherwise the robot stays where it is.
+   */
+  private assignParkingRoute(
+    robot: Robot,
+    occupied: Set<string> = this.robotOccupancy(robot),
+    allowApron = true,
+  ): void {
     const { width, height } = this.world.config.grid;
-    const occupied = this.robotOccupancy(robot);
-    const apron = Math.max(2, Math.floor(Math.min(width, height) / 8));
-    const docks = this.world.stations.flatMap((station) => station.docks);
 
     const preferred: Cell[] = [];
     const fallback: Cell[] = [];
@@ -654,15 +669,7 @@ export class Simulation {
       for (let x = 0; x < width; x++) {
         const cell = { x, y };
         if (occupied.has(cellKey(cell))) continue;
-
-        let nearDock = false;
-        for (const dock of docks) {
-          if (manhattan(cell, dock) <= apron) {
-            nearDock = true;
-            break;
-          }
-        }
-        if (nearDock) fallback.push(cell);
+        if (this.apron[y * width + x] === 1) fallback.push(cell);
         else preferred.push(cell);
       }
     }
@@ -672,11 +679,14 @@ export class Simulation {
     // to leaving the robot parked on the station approach, so the fallback pool
     // is used explicitly rather than silently routing into the apron. When
     // even the fallback is empty the robot stays where it is.
-    const pool = preferred.length > 0 ? preferred : fallback;
+    const pool = preferred.length > 0 ? preferred : allowApron ? fallback : [];
     if (pool.length === 0) return;
 
-    const target = pool[this.parkingSeq % pool.length]!;
-    this.parkingSeq += 1;
+    // A seeded uniform draw keeps parked robots spread over the hive. Walking
+    // the pool in row-major order instead fills the top rows first, and the
+    // resulting band of parked robots gridlocks the default scenario in under
+    // an hour; nearest-free-cell parking walls off the station aprons.
+    const target = pool[this.world.rng.int(pool.length)]!;
     const path = findPath(this.world.config.grid, robot.cell, target);
     if (path.length === 0) return;
 
@@ -686,7 +696,7 @@ export class Simulation {
   }
 
   /** Cells occupied by robots other than `self`. */
-  private robotOccupancy(self: Robot): Set<string> {
+  private robotOccupancy(self: Robot | null): Set<string> {
     const occupied = new Set<string>();
     for (const robot of this.world.robots) {
       if (robot !== self) occupied.add(cellKey(robot.cell));

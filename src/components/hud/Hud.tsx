@@ -1,20 +1,30 @@
 'use client';
 
-import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
 import { useStore } from 'zustand';
 import type { StoreApi } from 'zustand/vanilla';
 import type { HudClient, HudState } from '@/lib/hudStore';
+import type { SnapshotSource } from '@/lib/snapshotSource';
 import type { InspectionTarget } from '@/worker/protocol';
+import { FleetPanel } from './FleetPanel';
+import { FloorKey } from './FloorKey';
 import { InspectorPanel } from './InspectorPanel';
 import { MetricsPanel } from './MetricsPanel';
+import { StationLabels } from './StationLabels';
+import { StationsPanel } from './StationsPanel';
 import { TopBar } from './TopBar';
 import { TransportDock } from './TransportDock';
+import { useLiveSnapshot } from './useLiveSnapshot';
 
 export type { HudClient } from '@/lib/hudStore';
 
 export interface HudProps {
   client: HudClient;
   state: StoreApi<HudState>;
+  /** Live snapshots for the fleet and station panels. */
+  source?: SnapshotSource;
+  /** The hive view, placed in the centre of the shell. */
+  stage?: ReactNode;
 }
 
 /**
@@ -25,8 +35,13 @@ export interface HudProps {
 const useIsomorphicLayoutEffect =
   typeof window === 'undefined' ? useEffect : useLayoutEffect;
 
-/** Layout-A floating HUD over the live hive view. */
-export function Hud({ client, state }: HudProps) {
+/**
+ * Application shell: run identity across the top, order flow and fleet on
+ * the left, the hive floor in the centre, stations and the inspector on the
+ * right, and run controls along the bottom.
+ */
+export function Hud({ client, state, source, stage }: HudProps) {
+  const snapshot = useLiveSnapshot(source);
   const selected = useStore(state, (s) => s.selected);
   // `undefined` distinguishes "not yet inspected" from "inspected nothing".
   const lastInspected = useRef<InspectionTarget | null | undefined>(undefined);
@@ -61,10 +76,21 @@ export function Hud({ client, state }: HudProps) {
   }, [selected, sendInspection]);
 
   return (
-    <div className="hud-root">
-      <TopBar state={state} />
-      <MetricsPanel state={state} />
-      <InspectorPanel state={state} />
+    <div className="app-shell">
+      <TopBar state={state} client={client} />
+      <aside className="rail rail-left" aria-label="Orders and fleet">
+        <MetricsPanel state={state} />
+        <FleetPanel state={state} snapshot={snapshot} />
+      </aside>
+      <section className="stage" aria-label="Hive floor">
+        {stage}
+        <StationLabels snapshot={snapshot} />
+        <FloorKey />
+      </section>
+      <aside className="rail rail-right" aria-label="Stations and inspector">
+        <StationsPanel state={state} snapshot={snapshot} />
+        <InspectorPanel state={state} />
+      </aside>
       <TransportDock client={client} state={state} />
     </div>
   );

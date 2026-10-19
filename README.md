@@ -54,23 +54,58 @@ its session once if the sidecar reports that the cached session is unknown (404)
 
 ### Layout and controls
 
-The UI uses layout A — a full-bleed hive with floating glass panels:
+The UI is a fixed frame around the hive floor, drawn like a warehouse floor plan:
 
-- **Top bar:** scenario name, active allocator, Python status, simulation clock.
-- **Top-left metrics:** throughput, orders completed, completion p50/p95, utilisation,
-  pending jobs, and a throughput sparkline.
-- **Top-right inspector:** click a robot to see its state, battery, job, order, assigned
-  station, path progress and carrying flag; click a station to see queue length/capacity,
-  busy state and remaining service time.
-- **Bottom dock:** Play/Pause, Step, Restart, speed selector (0.25×, 0.5×, 1×, 2×, 4×,
-  8×, 16×), measured achieved speed, algorithm selector, scenario selector, and the
-  robot-state legend.
-- **Scene:** instanced robots and pods, grid floor and station meshes, with orbit/zoom
-  camera controls. The algorithm selector requests a hot-swap on the next allocation
-  tick, keeping the same world; the label changes only after the worker acknowledges the
-  active strategy, so a rejected strategy leaves the previous label in place and shows
-  the error. Choosing a scenario restarts the simulation with that config, and **Restart**
-  reruns the currently active config without reselecting it.
+- **Top bar:** scenario and algorithm selectors, Python status, error badge and the
+  simulation clock.
+- **Left rail, Orders:** throughput since start, orders done, median and p95 completion
+  time, a throughput-over-time chart and a jobs-waiting chart (hover either chart to read
+  a sample).
+- **Left rail, Fleet:** share of robot time spent working, a stacked bar of robots by
+  current state, and a table with the live count and cumulative time share per state.
+- **Centre, Floor:** the pod storage block (slate slabs; yellow while reserved for a trip;
+  empty while the pod is out at a station), the open aisles around it, safety-hatched port
+  zones and dark dock cells at each station, and robots coloured by state (off-white when
+  idle). Each station block shows a live queue gauge and lights up while picking. A floor
+  key sits in the corner.
+- **Right rail:** one row per pick station with its queue slots, picking state and busy
+  share (click a row to select it), then the inspector. Selecting a robot by clicking it
+  shows its job, order, pod slot, station, remaining cells and position, and draws a ring
+  around it, its remaining route, and the slot of the pod it is fetching. Selecting a
+  station outlines its port zone. **Clear** drops the selection.
+- **Bottom bar:** Play/Pause, Step, Restart, speed selector (0.25× to 16×), measured
+  achieved speed, and **Plan** / **Angled** camera presets. Orbit and zoom stay free
+  between presets.
+
+The algorithm selector requests a hot-swap on the next allocation tick, keeping the same
+world; the label changes only after the worker acknowledges the active strategy, so a
+rejected strategy leaves the previous label in place and shows the error. Choosing a
+scenario restarts the simulation with that config, and **Restart** reruns the currently
+active config without reselecting it.
+
+### Pod storage and port zones
+
+Pods live in a constrained storage area and are only ever fetched to station docks:
+
+- Every pod has a fixed **home slot**. Slots form one compact block at the centre of the
+  storage area, so the leftover storage cells become aisles around it.
+- No slot is closer than `layout.portClearance` cells (Manhattan, default 3) to any dock,
+  so each station keeps a pod-free **port zone**.
+- By default the storage area is the whole grid inset by `portClearance` on every edge
+  that carries a dock. `layout.storage {x, y, width, height}` sets it explicitly.
+- A pod is reserved when an order line picks it, carried from its slot to a dock of the
+  assigned station, serviced, and after `pods.replenishDelayMs` it reappears **in the same
+  slot**. Pods never move to a different slot.
+- Robots run on top of the grid and drive over stored pods, as in a hive. They start
+  spread over the grid outside the station aprons, and after a deposit each robot parks on
+  a seeded random free cell outside them, which keeps idle robots spread out instead of
+  banking up in one area.
+- Each dock has a no-parking **apron** (Manhattan radius `max(2, min(width, height) / 8)`,
+  12 cells on the default grid) that parking targets and robot start cells avoid. An idle
+  robot found inside one, for example one nudged there by passing traffic, is routed back
+  out on the next tick.
+  Parked robots on a station approach otherwise get boxed in by arriving loaded robots
+  and block the docks for good.
 
 ## Headless runs
 
@@ -260,8 +295,8 @@ its pods are serviced and the packing timer finishes.
 
 ## Determinism
 
-- The config `seed` (default 42, overridable with `--seed`) drives order generation, pod
-  replenishment placement and simulation tie-breaks through a seeded PRNG. The core never
+- The config `seed` (default 42, overridable with `--seed`) drives order generation,
+  robot start cells and simulation tie-breaks through a seeded PRNG. The core never
   reads wall-clock time or `Math.random`.
 - Iteration over robots, jobs and stations uses stable array/Map insertion order, and FCFS
   breaks ties by creation time and id.
@@ -301,12 +336,14 @@ applies defaults for omitted values. A complete explicit config is recommended �
 Key fields: `grid {width, height}`, `robots`, `pods {count, replenishDelayMs}`,
 `stations [{id, docks [[x, y], ...], queueCapacity, serviceTimeMs}]`,
 `orders {arrivalRatePerHour, linesPerOrder {min, max}, packingTimeMs}`,
-`allocation {intervalMs, strategy, timeoutMs, onFailure}`, `movement {tickMs}`, `seed`.
+`allocation {intervalMs, strategy, timeoutMs, onFailure}`,
+`layout {storage: {x, y, width, height} | null, portClearance}`, `movement {tickMs}`, `seed`.
 
 Validation rules include: positive integers for sizes and durations; `robots` no greater
 than the grid cell count; `robots + pods.count` no greater than the grid cell count; at
 least one station, with docks inside the grid; unique station ids and dock cells;
-`linesPerOrder.min <= max`. Invalid
+`linesPerOrder.min <= max`; `layout.storage` inside the grid; and `pods.count` no
+greater than the number of storage slots clear of every port zone. Invalid
 files are skipped by discovery with a warning, so a broken scenario does not prevent the
 UI from loading.
 
@@ -320,7 +357,7 @@ src/worker/         Web Worker that owns one Simulation; src/lib/simClient.ts an
                     snapshotSource.ts decode and interpolate typed-array snapshots
                     published every 50 ms (status at 200 ms).
 src/components/hive R3F instanced scene: robots, pods, grid floor, stations, picking.
-src/components/hud  Layout A panels and controls backed by the Zustand HUD store.
+src/components/hud  App shell, rails, charts and controls backed by the Zustand HUD store.
 src/headless/       CLI parsing and the headless loop; scripts/run-headless.ts and
                     scripts/benchmark.ts are the command entry points.
 python/hive_sim/    Stdlib sidecar: server.py (HTTP/session lifecycle), runner.py

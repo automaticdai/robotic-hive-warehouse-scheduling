@@ -1,4 +1,4 @@
-import type { SimConfig } from '@/sim/config';
+import type { Cell, SimConfig } from '@/sim/config';
 import type { RobotStatus } from '@/sim/types';
 import type { MetricsSummary, Snapshot } from '@/sim/simulation';
 
@@ -13,14 +13,14 @@ export interface SnapshotMeta {
 /**
  * A snapshot split into transferable buffers. The buffer order is fixed:
  * robots.x, robots.y, robots.state, robots.carrying, robots.battery,
- * pods.x, pods.y, pods.visible.
+ * pods.x, pods.y, pods.visible, pods.state.
  */
 export interface SerializedSnapshot {
   meta: SnapshotMeta;
   buffers: ArrayBuffer[];
 }
 
-const BUFFER_COUNT = 8;
+const BUFFER_COUNT = 9;
 
 export interface InspectionTarget {
   type: 'robot' | 'station';
@@ -39,6 +39,11 @@ export interface RobotInspectionDetail {
     pathRemaining: number;
     carrying: boolean;
   };
+  /** Current cell and remaining route, for drawing the trip in the scene. */
+  cell?: Cell;
+  path?: Cell[];
+  /** Home slot of the pod this robot is fetching or carrying. */
+  pickup?: Cell | null;
 }
 
 export interface StationInspectionDetail {
@@ -134,6 +139,7 @@ export function encodeSnapshot(snapshot: Snapshot): SerializedSnapshot {
       snapshot.pods.x.buffer as ArrayBuffer,
       snapshot.pods.y.buffer as ArrayBuffer,
       snapshot.pods.visible.buffer as ArrayBuffer,
+      snapshot.pods.state.buffer as ArrayBuffer,
     ],
   };
 }
@@ -195,7 +201,7 @@ function validateBuffers(buffers: unknown, robotIds: string[]): ArrayBuffer[] {
   }
   const podLength = buffers[5]!.byteLength / 4;
   for (let index = 5; index < BUFFER_COUNT; index++) {
-    const elementSize = index === 7 ? 1 : 4;
+    const elementSize = index >= 7 ? 1 : 4;
     if (buffers[index]!.byteLength !== podLength * elementSize) {
       throw new ProtocolError('Pod snapshot buffer lengths are inconsistent');
     }
@@ -210,8 +216,8 @@ export function decodeSnapshotEvent(event: SnapshotEvent): Snapshot {
   }
   const meta = validateMeta(event.meta);
   const buffers = validateBuffers(event.buffers, meta.robotIds);
-  const [robotX, robotY, robotState, robotCarrying, robotBattery, podX, podY, podVisible] =
-    buffers as [ArrayBuffer, ArrayBuffer, ArrayBuffer, ArrayBuffer, ArrayBuffer, ArrayBuffer, ArrayBuffer, ArrayBuffer];
+  const [robotX, robotY, robotState, robotCarrying, robotBattery, podX, podY, podVisible, podState] =
+    buffers as [ArrayBuffer, ArrayBuffer, ArrayBuffer, ArrayBuffer, ArrayBuffer, ArrayBuffer, ArrayBuffer, ArrayBuffer, ArrayBuffer];
 
   return {
     timeMs: meta.timeMs,
@@ -227,6 +233,7 @@ export function decodeSnapshotEvent(event: SnapshotEvent): Snapshot {
       x: new Float32Array(podX),
       y: new Float32Array(podY),
       visible: new Uint8Array(podVisible),
+      state: new Uint8Array(podState),
     },
     stations: meta.stations,
     // Structured clone may reorder/annotate fields; the event-level metrics

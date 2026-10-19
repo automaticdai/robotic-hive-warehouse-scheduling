@@ -17,7 +17,7 @@ test('world placement is deterministic for a seed', () => {
   expect(a.pods.map((p) => p.cell)).toEqual(b.pods.map((p) => p.cell));
 });
 
-test('robots and pods each occupy distinct cells', () => {
+test('robots and pods each occupy distinct cells within their own set', () => {
   const world = createWorld(config);
   expect(new Set(world.robots.map((r) => cellKey(r.cell))).size).toBe(5);
   expect(new Set(world.pods.map((p) => cellKey(p.cell))).size).toBe(7);

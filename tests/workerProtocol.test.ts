@@ -10,7 +10,7 @@ test('snapshot buffers survive a structured-clone-style round trip', () => {
       state: new Uint8Array([1]), carrying: new Uint8Array([0]),
       battery: new Float32Array([1]),
     },
-    pods: { x: new Float32Array([9]), y: new Float32Array([9]), visible: new Uint8Array([1]) },
+    pods: { x: new Float32Array([9]), y: new Float32Array([9]), visible: new Uint8Array([1]), state: new Uint8Array([0]) },
     stations: [{ id: 'S-1', queueLength: 1, capacity: 8, busy: true }],
     metrics: {} as any,
   };

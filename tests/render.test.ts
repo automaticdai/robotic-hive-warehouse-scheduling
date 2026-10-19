@@ -17,8 +17,8 @@ test('interpolates linearly', () => {
 });
 
 test('state colours are stable', () => {
-  expect(stateColor('idle')).toBe('#5f7d8c');
-  expect(stateColor('waiting')).toBe('#c0442f');
+  expect(stateColor('idle')).toBe('#f4f5f1');
+  expect(stateColor('waiting')).toBe('#e0542e');
 });
 
 function snapshotAt(timeMs: number): Snapshot {
@@ -40,6 +40,7 @@ function robotSnapshot(cells: { x: number; y: number }[]): Snapshot {
       x: new Float32Array(0),
       y: new Float32Array(0),
       visible: new Uint8Array(0),
+      state: new Uint8Array(0),
     },
     stations: [],
     metrics: {} as Snapshot['metrics'],

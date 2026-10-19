@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { storageCells, type Rect } from './layout';
 
 export interface Cell {
   x: number;
@@ -35,6 +36,16 @@ export interface AllocationConfig {
   onFailure: 'fallback-fcfs' | 'wait';
 }
 
+export interface LayoutConfig {
+  /**
+   * Rectangle pods are stored in. `null` derives it from the grid, keeping a
+   * `portClearance`-wide pod-free aisle along every edge that carries a dock.
+   */
+  storage: Rect | null;
+  /** Minimum Manhattan distance between any pod home slot and any dock. */
+  portClearance: number;
+}
+
 export interface MovementConfig {
   tickMs: number;
 }
@@ -46,6 +57,7 @@ export interface SimConfig {
   stations: StationConfig[];
   orders: OrdersConfig;
   allocation: AllocationConfig;
+  layout: LayoutConfig;
   movement: MovementConfig;
   seed: number;
 }
@@ -130,6 +142,20 @@ const rawConfigSchema = z.object({
       timeoutMs: 2000,
       onFailure: 'fallback-fcfs',
     }),
+  layout: z
+    .object({
+      storage: z
+        .object({
+          x: z.number().int().min(0),
+          y: z.number().int().min(0),
+          width: positiveInt,
+          height: positiveInt,
+        })
+        .nullable()
+        .default(null),
+      portClearance: z.number().int().min(0).default(3),
+    })
+    .default({ storage: null, portClearance: 3 }),
   movement: z
     .object({ tickMs: positiveInt.default(100) })
     .default({ tickMs: 100 }),
@@ -164,6 +190,30 @@ const configSchema = rawConfigSchema
         code: 'custom',
         path: ['pods', 'count'],
         message: `robots (${config.robots}) + pods.count (${config.pods.count}) exceeds grid cell count (${robotsLimit})`,
+      });
+    }
+
+    const storage = config.layout.storage;
+    if (storage !== null && (storage.x + storage.width > width || storage.y + storage.height > height)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['layout', 'storage'],
+        message: `storage rectangle extends outside the ${width}x${height} grid`,
+      });
+    }
+
+    const slots = storageCells({
+      grid: config.grid,
+      stations: config.stations.map((station) => ({
+        docks: station.docks.map(([x, y]) => ({ x, y })),
+      })),
+      layout: config.layout,
+    }).length;
+    if (config.pods.count > slots) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['pods', 'count'],
+        message: `pods.count (${config.pods.count}) exceeds the ${slots} storage slots clear of station ports`,
       });
     }
 

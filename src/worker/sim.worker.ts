@@ -113,6 +113,9 @@ function describeRobot(id: string): InspectionDetail | null {
       pathRemaining: robot.path.length,
       carrying: robot.carrying,
     },
+    cell: { x: robot.cell.x, y: robot.cell.y },
+    path: robot.path.map((cell) => ({ x: cell.x, y: cell.y })),
+    pickup: job === undefined ? null : { x: job.pickup.x, y: job.pickup.y },
   };
 }
 

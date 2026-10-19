@@ -259,6 +259,7 @@ test('parking uses the in-apron fallback when no outside-apron cell is free', ()
       grid: { width: 3, height: 3 },
       robots: 1,
       pods: { count: 1 },
+      layout: { portClearance: 0 },
       stations: [{ id: 'S-1', docks: [[1, 1]], queueCapacity: 2, serviceTimeMs: 1000 }],
       seed: 3,
     }),
@@ -338,4 +339,47 @@ test('FCFS keeps completing jobs through persistent traffic', () => {
 
   const jobsAt180s = sim.getMetrics().jobsCompleted;
   expect(jobsAt180s).toBeGreaterThan(jobsAt90s);
+});
+
+test('an idle robot left inside a station apron is routed out of it', () => {
+  // Idle robots standing on or next to docks wall off the station once loaded
+  // robots crowd around them, so the apron is kept clear of parked robots.
+  const sim = new Simulation(
+    parseConfig({
+      grid: { width: 30, height: 30 },
+      robots: 3,
+      pods: { count: 10 },
+      stations: [{ id: 'S-1', docks: [[0, 15]], queueCapacity: 2, serviceTimeMs: 1000 }],
+      orders: { arrivalRatePerHour: 0 },
+      seed: 3,
+    }),
+  );
+  const dock = sim.world.stations[0]!.docks[0]!;
+  const robot = sim.world.robots[0]!;
+  robot.cell = { ...dock };
+
+  sim.tick();
+
+  expect(robot.status).toBe('moving_empty');
+  expect(robot.path.length).toBeGreaterThan(0);
+  expect(manhattan(robot.path.at(-1)!, dock)).toBeGreaterThan(3);
+});
+
+test('robots do not start inside a station apron', () => {
+  const sim = new Simulation(
+    parseConfig({
+      grid: { width: 40, height: 40 },
+      robots: 200,
+      pods: { count: 300 },
+      stations: [{ id: 'S-1', docks: [[0, 20], [0, 21]], queueCapacity: 4, serviceTimeMs: 1000 }],
+      orders: { arrivalRatePerHour: 0 },
+      seed: 5,
+    }),
+  );
+  const apron = 5; // max(2, floor(40 / 8))
+  for (const robot of sim.world.robots) {
+    for (const dock of sim.world.stations[0]!.docks) {
+      expect(manhattan(robot.cell, dock)).toBeGreaterThan(apron);
+    }
+  }
 });

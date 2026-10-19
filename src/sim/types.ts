@@ -20,8 +20,12 @@ export interface Robot {
   blockedTicks: number;
 }
 
+/** Numeric pod-state encoding used by snapshot consumers. */
+export const POD_STATE_CODE = { stored: 0, reserved: 1, out: 2 } as const;
+
 export interface Pod {
   id: string;
+  /** Fixed home slot in the storage block; pods never change slot. */
   cell: Cell;
   available: boolean;
   reservedByJobId: string | null;

@@ -1,28 +1,25 @@
 'use client';
 
-import { useFrame } from '@react-three/fiber';
 import { useEffect, useMemo, useRef } from 'react';
-import { Object3D, type InstancedMesh } from 'three';
+import { useFrame } from '@react-three/fiber';
+import { Color, Object3D, type InstancedMesh } from 'three';
 import type { SnapshotSource } from '@/lib/snapshotSource';
 import type { SimConfig } from '@/sim/config';
-import { cellToWorldInto, type WorldPosition } from './render';
+import { POD_STATE_CODE } from '@/sim/types';
+import { cellToWorldInto, FLOOR_PALETTE, type WorldPosition } from './render';
 
 export interface PodInstancesProps {
   source: SnapshotSource;
   config: SimConfig;
 }
 
-const POD_Y = 0.15;
+const POD_HEIGHT = 0.12;
+const POD_Y = POD_HEIGHT / 2;
 
-function sameValues(previous: Float32Array | null, next: Float32Array): boolean {
-  if (previous === null || previous.length !== next.length) return false;
-  for (let index = 0; index < next.length; index++) {
-    if (previous[index] !== next[index]) return false;
-  }
-  return true;
-}
+const STORED_COLOR = new Color(FLOOR_PALETTE.podStored);
+const RESERVED_COLOR = new Color(FLOOR_PALETTE.podReserved);
 
-function sameVisibility(previous: Uint8Array | null, next: Uint8Array): boolean {
+function sameBytes(previous: Uint8Array | null, next: Uint8Array): boolean {
   if (previous === null || previous.length !== next.length) return false;
   for (let index = 0; index < next.length; index++) {
     if (previous[index] !== next[index]) return false;
@@ -31,16 +28,16 @@ function sameVisibility(previous: Uint8Array | null, next: Uint8Array): boolean 
 }
 
 /**
- * Pods only move when a pod is reserved/replenished, so matrices are rewritten
- * only when the position or visibility buffers actually differ. Hidden pods
- * are collapsed to a zero scale instead of being removed from the mesh.
+ * Pods are flat slabs on their fixed home slots. A slab is slate while
+ * stored, safety yellow while reserved for a trip (so demand is visible
+ * across the block), and removed while the pod is out at a station; the empty
+ * slot shows the storage floor until the pod returns. Pods never change slot,
+ * so instances are rewritten only when the state buffer changes.
  */
 export function PodInstances({ source, config }: PodInstancesProps) {
   const meshRef = useRef<InstancedMesh>(null);
   const pod = useMemo(() => new Object3D(), []);
-  const lastX = useRef<Float32Array | null>(null);
-  const lastY = useRef<Float32Array | null>(null);
-  const lastVisible = useRef<Uint8Array | null>(null);
+  const lastState = useRef<Uint8Array | null>(null);
   const worldPosition = useRef<WorldPosition>({ x: 0, z: 0 });
 
   const capacity = Math.max(1, config.pods.count);
@@ -48,37 +45,32 @@ export function PodInstances({ source, config }: PodInstancesProps) {
 
   useEffect(() => {
     if (meshRef.current) meshRef.current.count = 0;
-  }, []);
+    lastState.current = null;
+  }, [config]);
 
   useFrame(() => {
     const mesh = meshRef.current;
     const snapshot = source.latest();
     if (!mesh || !snapshot) return;
 
-    const { x, y, visible } = snapshot.pods;
-    const count = Math.min(visible.length, mesh.instanceMatrix.count);
+    const { x, y, state } = snapshot.pods;
+    const count = Math.min(state.length, mesh.instanceMatrix.count);
     mesh.count = count;
-
-    if (
-      sameValues(lastX.current, x) &&
-      sameValues(lastY.current, y) &&
-      sameVisibility(lastVisible.current, visible)
-    ) {
-      return;
-    }
+    if (sameBytes(lastState.current, state)) return;
 
     for (let index = 0; index < count; index++) {
+      const code = state[index];
       const world = cellToWorldInto(x[index], y[index], grid, 1, worldPosition.current);
       pod.position.set(world.x, POD_Y, world.z);
-      pod.scale.setScalar(visible[index] ? 1 : 0);
+      pod.scale.setScalar(code === POD_STATE_CODE.out ? 0 : 1);
       pod.updateMatrix();
       mesh.setMatrixAt(index, pod.matrix);
+      mesh.setColorAt(index, code === POD_STATE_CODE.reserved ? RESERVED_COLOR : STORED_COLOR);
     }
 
     mesh.instanceMatrix.needsUpdate = true;
-    lastX.current = x;
-    lastY.current = y;
-    lastVisible.current = visible;
+    if (mesh.instanceColor !== null) mesh.instanceColor.needsUpdate = true;
+    lastState.current = state;
   });
 
   return (
@@ -86,9 +78,10 @@ export function PodInstances({ source, config }: PodInstancesProps) {
       ref={meshRef}
       args={[undefined, undefined, capacity]}
       frustumCulled={false}
+      raycast={() => null}
     >
-      <cylinderGeometry args={[0.3, 0.3, 0.3, 8]} />
-      <meshStandardMaterial color="#8fb0a6" roughness={0.7} metalness={0.1} />
+      <boxGeometry args={[0.84, POD_HEIGHT, 0.84]} />
+      <meshStandardMaterial roughness={0.85} metalness={0.05} />
     </instancedMesh>
   );
 }

@@ -40,7 +40,7 @@ test('decodes snapshot events for onSnapshot subscribers', () => {
       state: new Uint8Array([1]), carrying: new Uint8Array([0]),
       battery: new Float32Array([0.5]),
     },
-    pods: { x: new Float32Array([9]), y: new Float32Array([8]), visible: new Uint8Array([1]) },
+    pods: { x: new Float32Array([9]), y: new Float32Array([8]), visible: new Uint8Array([1]), state: new Uint8Array([0]) },
     stations: [{ id: 'S-1', queueLength: 2, capacity: 8, busy: true }],
     metrics: { ordersCompleted: 1 } as any,
   };

@@ -8,6 +8,7 @@ import type { SimConfig } from '@/sim/config';
 import type { InspectionTarget } from '@/worker/protocol';
 import {
   interpolatedWorldPosition,
+  FLOOR_PALETTE,
   ROBOT_STATUS_ORDER,
   stateColor,
   type WorldPosition,
@@ -19,9 +20,9 @@ export interface RobotInstancesProps {
   onSelect(target: InspectionTarget): void;
 }
 
-const ROBOT_Y = 0.4;
-const CARRYING_Y = 0.55;
-const POD_BLOCK_Y = 0.88;
+const ROBOT_Y = 0.32;
+const CARRYING_Y = 0.42;
+const POD_BLOCK_Y = 0.74;
 
 /** Colours are parsed once; `stateColor` remains the single source of truth. */
 const STATE_COLORS = ROBOT_STATUS_ORDER.map((status) => new Color(stateColor(status)));
@@ -120,8 +121,8 @@ export function RobotInstances({ source, config, onSelect }: RobotInstancesProps
         frustumCulled={false}
         onClick={handleClick}
       >
-        <boxGeometry args={[0.7, 0.35, 0.7]} />
-        <meshStandardMaterial roughness={0.55} metalness={0.15} />
+        <boxGeometry args={[0.74, 0.3, 0.74]} />
+        <meshStandardMaterial roughness={0.45} metalness={0.1} />
       </instancedMesh>
       <instancedMesh
         ref={carryRef}
@@ -129,8 +130,8 @@ export function RobotInstances({ source, config, onSelect }: RobotInstancesProps
         frustumCulled={false}
         raycast={() => null}
       >
-        <boxGeometry args={[0.4, 0.3, 0.4]} />
-        <meshStandardMaterial color="#d8e8e2" roughness={0.6} metalness={0.1} />
+        <boxGeometry args={[0.56, 0.3, 0.56]} />
+        <meshStandardMaterial color={FLOOR_PALETTE.carriedPod} roughness={0.7} metalness={0.05} />
       </instancedMesh>
     </group>
   );
