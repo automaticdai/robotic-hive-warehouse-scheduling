@@ -36,6 +36,33 @@ a {
   text-decoration: none;
 }
 
+/* Live 3D hive canvas, fixed beneath the floating HUD. */
+.hive-canvas {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+}
+
+.hive-canvas canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.station-label {
+  padding: 2px 6px;
+  color: #cfe3dd;
+  font-family: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+  background: rgba(13, 20, 24, 0.78);
+  border: 1px solid rgba(120, 170, 160, 0.35);
+  border-radius: 3px;
+}
+
 /* HUD layout A: floating glass panels over the live hive view. */
 .hud-page-title {
   position: absolute;
