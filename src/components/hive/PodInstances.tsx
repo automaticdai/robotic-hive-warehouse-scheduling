@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import { Object3D, type InstancedMesh } from 'three';
 import type { SnapshotSource } from '@/lib/snapshotSource';
 import type { SimConfig } from '@/sim/config';
+import { cellToWorldInto, type WorldPosition } from './render';
 
 export interface PodInstancesProps {
   source: SnapshotSource;
@@ -40,8 +41,10 @@ export function PodInstances({ source, config }: PodInstancesProps) {
   const lastX = useRef<Float32Array | null>(null);
   const lastY = useRef<Float32Array | null>(null);
   const lastVisible = useRef<Uint8Array | null>(null);
+  const worldPosition = useRef<WorldPosition>({ x: 0, z: 0 });
 
   const capacity = Math.max(1, config.pods.count);
+  const grid = config.grid;
 
   useEffect(() => {
     if (meshRef.current) meshRef.current.count = 0;
@@ -65,7 +68,8 @@ export function PodInstances({ source, config }: PodInstancesProps) {
     }
 
     for (let index = 0; index < count; index++) {
-      pod.position.set(x[index], POD_Y, y[index]);
+      const world = cellToWorldInto(x[index], y[index], grid, 1, worldPosition.current);
+      pod.position.set(world.x, POD_Y, world.z);
       pod.scale.setScalar(visible[index] ? 1 : 0);
       pod.updateMatrix();
       mesh.setMatrixAt(index, pod.matrix);

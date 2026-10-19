@@ -6,7 +6,12 @@ import { Color, Object3D, type InstancedMesh } from 'three';
 import type { SnapshotSource } from '@/lib/snapshotSource';
 import type { SimConfig } from '@/sim/config';
 import type { InspectionTarget } from '@/worker/protocol';
-import { interpolate, ROBOT_STATUS_ORDER, stateColor } from './render';
+import {
+  interpolatedWorldPosition,
+  ROBOT_STATUS_ORDER,
+  stateColor,
+  type WorldPosition,
+} from './render';
 
 export interface RobotInstancesProps {
   source: SnapshotSource;
@@ -30,10 +35,12 @@ export function RobotInstances({ source, config, onSelect }: RobotInstancesProps
   const meshRef = useRef<InstancedMesh>(null);
   const carryRef = useRef<InstancedMesh>(null);
   const lastStates = useRef<Uint8Array | null>(null);
+  const worldPosition = useRef<WorldPosition>({ x: 0, z: 0 });
   const robot = useMemo(() => new Object3D(), []);
   const carriedPod = useMemo(() => new Object3D(), []);
 
   const capacity = Math.max(1, config.robots);
+  const grid = config.grid;
 
   useEffect(() => {
     // Snapshots arrive after mount; do not draw a full grid of robots at the
@@ -45,7 +52,9 @@ export function RobotInstances({ source, config, onSelect }: RobotInstancesProps
   useFrame(() => {
     const mesh = meshRef.current;
     const carryMesh = carryRef.current;
-    const sample = source.sample(performance.now());
+    // Sample one receive interval in the past so the previous→current blend
+    // always has an alpha strictly inside (0, 1) during normal play.
+    const sample = source.sample(performance.now() - source.intervalMs());
     if (!mesh || !carryMesh || !sample) return;
 
     const { previous, current, alpha } = sample;
@@ -61,26 +70,22 @@ export function RobotInstances({ source, config, onSelect }: RobotInstancesProps
       colorsChanged = true;
     }
 
-    const previousX = previous?.robots.x;
-    const previousY = previous?.robots.y;
-
     for (let index = 0; index < count; index++) {
-      const currentX = current.robots.x[index] ?? 0;
-      const currentZ = current.robots.y[index] ?? 0;
-      const hasPrevious =
-        previousX !== undefined &&
-        previousY !== undefined &&
-        index < previousX.length &&
-        index < previousY.length;
-      const x = hasPrevious ? interpolate(previousX[index], currentX, alpha) : currentX;
-      const z = hasPrevious ? interpolate(previousY[index], currentZ, alpha) : currentZ;
+      const world = interpolatedWorldPosition(
+        previous,
+        current,
+        alpha,
+        index,
+        grid,
+        worldPosition.current,
+      );
       const carrying = current.robots.carrying[index] === 1;
 
-      robot.position.set(x, carrying ? CARRYING_Y : ROBOT_Y, z);
+      robot.position.set(world.x, carrying ? CARRYING_Y : ROBOT_Y, world.z);
       robot.updateMatrix();
       mesh.setMatrixAt(index, robot.matrix);
 
-      carriedPod.position.set(x, POD_BLOCK_Y, z);
+      carriedPod.position.set(world.x, POD_BLOCK_Y, world.z);
       carriedPod.scale.setScalar(carrying ? 1 : 0);
       carriedPod.updateMatrix();
       carryMesh.setMatrixAt(index, carriedPod.matrix);

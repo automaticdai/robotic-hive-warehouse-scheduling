@@ -35,6 +35,16 @@ export class SnapshotSource {
   }
 
   /**
+   * Wall-clock span between the two most recent receives. Renderers subtract
+   * this from the current time before sampling so they blend one interval
+   * behind the worker and never race past the newest snapshot.
+   */
+  intervalMs(): number {
+    if (this.currentAtMs === null || this.previousAtMs === null) return 0;
+    return Math.max(0, this.currentAtMs - this.previousAtMs);
+  }
+
+  /**
    * Returns the blend state for `nowMs`. With one snapshot there is nothing to
    * blend, so alpha is 1; with two, alpha is the clamped fraction of the
    * receive interval that has elapsed. Sampling before the previous receive
