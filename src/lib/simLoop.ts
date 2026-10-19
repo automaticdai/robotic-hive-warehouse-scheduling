@@ -18,7 +18,10 @@ const MIN_SPEED = 0.25;
 const MAX_SPEED = 16;
 /**
  * Wall-clock window over which achieved speed is measured. Long enough to
- * smooth allocation-boundary stalls, short enough to report lag promptly.
+ * smooth allocation-boundary stalls, short enough to report lag promptly. The
+ * effective window is widened to at least two ticks so a configuration whose
+ * tick is longer than this base window cannot measure zero ticks and report a
+ * false lag.
  */
 const ACHIEVED_SPEED_WINDOW_MS = 500;
 
@@ -164,7 +167,11 @@ export class SimLoop {
         }
       }
 
-      this.updateAchievedSpeed(nowMs);
+      // Measure against the wall clock at the end of the turn, not the
+      // timestamp the timer callback was scheduled with. The callback
+      // timestamp is also the pacing input, so using it here would report the
+      // requested multiplier by construction and hide processing/queue lag.
+      this.updateAchievedSpeed();
       this.emitSnapshotIfDue();
     });
   }
@@ -185,13 +192,29 @@ export class SimLoop {
     this.achieved = null;
   }
 
-  private updateAchievedSpeed(wallMs: number): void {
+  private updateAchievedSpeed(): void {
     if (!this.isRunning) return;
+
+    // Sample the real clock after the turn has done its work. A turn that was
+    // queued behind processing or an allocation has a callback timestamp in
+    // the past; the elapsed wall time here includes that delay.
+    const wallMs = this.now();
+    if (!Number.isFinite(wallMs)) return;
+
     const elapsedWallMs = wallMs - this.measureWallMs;
-    if (elapsedWallMs < ACHIEVED_SPEED_WINDOW_MS) return;
+    if (elapsedWallMs < 0) {
+      // A non-monotonic clock would otherwise produce a bogus negative or
+      // huge rate. Restart the window at the new reading.
+      this.resetAchievedSpeedWindow(wallMs);
+      return;
+    }
+    if (elapsedWallMs === 0) return;
+
+    const windowMs = Math.max(ACHIEVED_SPEED_WINDOW_MS, this.tickMs * 2);
+    if (elapsedWallMs < windowMs) return;
 
     const elapsedSimMs = this.sim.timeMs - this.measureSimMs;
-    this.achieved = elapsedWallMs > 0 ? Math.max(0, elapsedSimMs) / elapsedWallMs : null;
+    this.achieved = Math.max(0, elapsedSimMs) / elapsedWallMs;
     this.measureWallMs = wallMs;
     this.measureSimMs = this.sim.timeMs;
   }

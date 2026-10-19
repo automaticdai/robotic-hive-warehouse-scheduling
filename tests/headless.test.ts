@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { parseDuration, parseHeadlessArgs } from '@/headless/args';
@@ -109,6 +109,60 @@ test('records allocator failures and FCFS fallbacks in the summary', async () =>
     expect(warnings.filter((line) => line.includes('allocator failed'))).toHaveLength(1);
     expect(
       warnings.some((line) => line.includes('WARNING') && line.includes('fell back to FCFS')),
+    ).toBe(true);
+  } finally {
+    warnSpy.mockRestore();
+  }
+});
+
+test('records all-failure wait runs as effectiveStrategy none', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'hive-wait-'));
+  const outDir = path.join(dir, 'out');
+  const raw = JSON.parse(await readFile('configs/smoke.json', 'utf8'));
+  raw.allocation = { ...raw.allocation, onFailure: 'wait' };
+  const configPath = path.join(dir, 'wait.json');
+  await writeFile(configPath, JSON.stringify(raw));
+
+  const warnings: string[] = [];
+  const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+    warnings.push(args.map(String).join(' '));
+  });
+
+  try {
+    const summary = await runHeadless({
+      configPath,
+      strategy: 'python:never_answers',
+      untilMs: 5_000,
+      seed: 42,
+      outDir,
+      allocatorOverride: {
+        allocate() {
+          throw new Error('allocator unavailable for test');
+        },
+      },
+    });
+
+    expect(summary.strategy).toBe('python:never_answers');
+    expect(summary.allocationAttempts).toBeGreaterThan(0);
+    expect(summary.allocatorFailures).toBe(summary.allocationAttempts);
+    expect(summary.fallbackAllocations).toBe(0);
+    expect(summary.usedFallback).toBe(false);
+    // The allocator never answered and no fallback was applied, so the run
+    // must not be presented as the requested strategy.
+    expect(summary.effectiveStrategy).toBe('none');
+
+    const written = JSON.parse(await readFile(path.join(outDir, 'summary.json'), 'utf8'));
+    expect(written.strategy).toBe('python:never_answers');
+    expect(written.effectiveStrategy).toBe('none');
+
+    expect(warnings.filter((line) => line.includes('allocator failed'))).toHaveLength(1);
+    expect(
+      warnings.some(
+        (line) =>
+          line.includes('WARNING') &&
+          line.includes('all') &&
+          line.includes('allocation requests failed'),
+      ),
     ).toBe(true);
   } finally {
     warnSpy.mockRestore();

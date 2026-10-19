@@ -22,7 +22,8 @@ export interface HeadlessSummary {
   strategyDigest: string;
   /**
    * Allocator that produced results. `fallback-fcfs` when any allocation fell
-   * back, otherwise the requested strategy.
+   * back, `none` when every allocation failed under the wait/skip policy and no
+   * allocator result was ever applied, otherwise the requested strategy.
    */
   effectiveStrategy: string;
   /** Number of allocation boundaries reached during the run. */
@@ -192,12 +193,23 @@ export async function runHeadless(
     const metrics = sim.getMetrics();
 
     const usedFallback = fallbackAllocations > 0;
+    // Under wait/skip every failed allocation is skipped instead of falling
+    // back, so `usedFallback` stays false even when the allocator never
+    // answered. Report that case explicitly rather than claiming the run used
+    // the requested strategy.
+    const allFailed =
+      allocationAttempts > 0 && allocatorFailures === allocationAttempts;
+    const effectiveStrategy = usedFallback
+      ? 'fallback-fcfs'
+      : allFailed
+        ? 'none'
+        : options.strategy;
     const summary: HeadlessSummary = {
       config,
       seed: config.seed,
       strategy: options.strategy,
       strategyDigest,
-      effectiveStrategy: usedFallback ? 'fallback-fcfs' : options.strategy,
+      effectiveStrategy,
       allocationAttempts,
       allocatorFailures,
       fallbackAllocations,
@@ -238,6 +250,14 @@ export async function runHeadless(
           `fell back to FCFS (${allocatorFailures} allocator failures). ` +
           `This run's metrics are not a pure "${options.strategy}" result; ` +
           `summary.json records effectiveStrategy="${summary.effectiveStrategy}".`,
+      );
+    } else if (allFailed) {
+      console.warn(
+        `[hive-sim] WARNING: all ${allocationAttempts} allocation requests failed ` +
+          `(${allocatorFailures} allocator failures) and the configured ` +
+          `"${config.allocation.onFailure}" policy skipped every allocation. ` +
+          `This run's metrics are not a "${options.strategy}" result; ` +
+          `summary.json records effectiveStrategy="none".`,
       );
     }
 

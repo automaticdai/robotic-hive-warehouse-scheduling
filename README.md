@@ -98,11 +98,13 @@ Each run writes three files to the output directory:
   duration, wall time, and the full `MetricsSummary`. It also records allocator fallback
   accounting: `effectiveStrategy`, `allocationAttempts`, `allocatorFailures`,
   `fallbackAllocations`, and `usedFallback`. `strategy` remains the requested id;
-  `effectiveStrategy` is `fallback-fcfs` when any allocation fell back, so a run in which
-  a Python strategy never answered is never presented as a pure Python result.
+  `effectiveStrategy` is `fallback-fcfs` when any allocation fell back, `none` when
+  every allocation failed under the `wait` policy and none was ever applied, and the
+  requested id otherwise. A run in which a Python strategy never answered is therefore
+  never presented as a pure Python result.
   Headless runs print a warning on the first allocator failure and a prominent summary
-  warning at the end when fallback was used; they do not change the exit code, because
-  `fallback-fcfs` is configured behavior.
+  warning at the end when fallback was used or every allocation failed; they do not
+  change the exit code, because `fallback-fcfs` and `wait` are configured behavior.
 - **`metrics.csv`** — time series sampled every 1 s of simulated time with columns
   `simTimeMs,ordersCompleted,jobsCompleted,throughputPerHour,utilisation,pendingJobs,avgQueueLength`.
 - **`config.resolved.json`** — the config after defaults have been applied.
@@ -282,10 +284,11 @@ its pods are serviced and the packing timer finishes.
   benchmark and is listed as such in [`docs/benchmarks.md`](docs/benchmarks.md).
 - Ticks are never skipped or merged. Requested speed is a target rate; the HUD shows the
   requested multiplier and, separately, the measured achieved speed (simulated time
-  advanced per wall time over a short window). When the achieved rate falls materially
-  below the target while running, the achieved value is highlighted in amber. Paused runs
-  report no achieved speed. The default allocation wall-clock timeout is 2 s, after which
-  FCFS fallback applies.
+  advanced per wall time over a window measured at turn completion, including allocator
+  and processing delay; the window is at least two ticks). When the achieved rate falls
+  materially below the target while running, the achieved value is highlighted in amber.
+  Paused runs report no achieved speed. The default allocation wall-clock timeout is 2 s,
+  after which FCFS fallback applies.
 
 ## Adding a scenario
 

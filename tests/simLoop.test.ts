@@ -168,6 +168,125 @@ test('achieved speed starts as null until a window has elapsed', () => {
   }
 });
 
+test('reports lag when a turn completes long after its callback timestamp', async () => {
+  vi.useFakeTimers();
+  try {
+    const sim = new Simulation(parseConfig(baseConfig));
+    let now = 0;
+    const loop = new SimLoop({
+      sim,
+      allocator: new FcfsAllocator(),
+      tickMs: 100,
+      now: () => now,
+    });
+    loop.start();
+
+    // The timer callback carries a stale timestamp (100 ms after start), but
+    // the turn only gets to run after a full second of real time has passed.
+    // Only one tick of simulation time is granted by the pacing delta, so the
+    // observed rate must be far below the requested 1×.
+    now = 1_000;
+    await loop.advanceTo(100);
+
+    expect(sim.timeMs).toBe(100);
+    expect(loop.achievedSpeed).not.toBeNull();
+    expect(loop.achievedSpeed!).toBeGreaterThan(0);
+    expect(loop.achievedSpeed!).toBeLessThan(1);
+    expect(loop.achievedSpeed!).toBeCloseTo(0.1, 2);
+    loop.pause();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('normal pacing reports the requested achieved speed', async () => {
+  vi.useFakeTimers();
+  try {
+    const sim = new Simulation(parseConfig(baseConfig));
+    let now = 0;
+    const loop = new SimLoop({
+      sim,
+      allocator: new FcfsAllocator(),
+      tickMs: 100,
+      now: () => now,
+    });
+    loop.setSpeed(2);
+    loop.start();
+
+    now = 500;
+    await loop.advanceTo(500);
+    now = 1_000;
+    await loop.advanceTo(1_000);
+
+    expect(sim.timeMs).toBe(2_000);
+    expect(loop.achievedSpeed!).toBeCloseTo(2, 2);
+    loop.pause();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('a large tick does not report false lag after a single tick', async () => {
+  vi.useFakeTimers();
+  try {
+    const sim = new Simulation(
+      parseConfig({ ...baseConfig, movement: { tickMs: 2_000 } }),
+    );
+    let now = 0;
+    const loop = new SimLoop({
+      sim,
+      allocator: new FcfsAllocator(),
+      tickMs: 2_000,
+      now: () => now,
+    });
+    loop.start();
+
+    // One 2 s tick within a 4 s window is a full 1× rate. A fixed 500 ms
+    // window would have measured zero ticks here and falsely cried lag.
+    now = 2_000;
+    await loop.advanceTo(2_000);
+    expect(sim.timeMs).toBe(2_000);
+    expect(loop.achievedSpeed).toBeNull();
+
+    now = 4_000;
+    await loop.advanceTo(4_000);
+    expect(loop.achievedSpeed!).toBeCloseTo(1, 2);
+    loop.pause();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('changing speed resets the achieved-speed window', async () => {
+  vi.useFakeTimers();
+  try {
+    const sim = new Simulation(parseConfig(baseConfig));
+    let now = 0;
+    const loop = new SimLoop({
+      sim,
+      allocator: new FcfsAllocator(),
+      tickMs: 100,
+      now: () => now,
+    });
+    loop.setSpeed(2);
+    loop.start();
+
+    now = 500;
+    await loop.advanceTo(500);
+    expect(loop.achievedSpeed!).toBeCloseTo(2, 2);
+
+    loop.setSpeed(4);
+    expect(loop.achievedSpeed).toBeNull();
+
+    now = 1_100;
+    await loop.advanceTo(1_100);
+    expect(loop.achievedSpeed!).toBeCloseTo(4, 2);
+    loop.pause();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test('reports successful allocations to onAllocationResult', async () => {
   const sim = new Simulation(parseConfig(baseConfig));
   const results: (unknown | null)[] = [];
