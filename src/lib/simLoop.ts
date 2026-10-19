@@ -9,7 +9,7 @@ export interface SimLoopOptions {
   now?: () => number;
   onSnapshot?: (snapshot: Snapshot) => void;
   snapshotIntervalMs?: number;
-  onAllocationResult?: (error: unknown | null) => void;
+  onAllocationResult?: (error: unknown | null, allocator: Allocator) => void;
 }
 
 /** Default wall-clock spacing between snapshot callbacks. */
@@ -33,7 +33,7 @@ export class SimLoop {
   private readonly onSnapshot: ((snapshot: Snapshot) => void) | undefined;
   private readonly snapshotIntervalMs: number;
   private readonly onAllocationResult:
-    | ((error: unknown | null) => void)
+    | ((error: unknown | null, allocator: Allocator) => void)
     | undefined;
 
   private allocator: Allocator;
@@ -161,17 +161,20 @@ export class SimLoop {
   private async runAllocationTurn(): Promise<void> {
     const observation = this.sim.observe();
     const seq = observation.allocationSeq;
+    // Results are reported against the allocator that produced them so a
+    // strategy swap can discard in-flight answers from the previous allocator.
+    const attemptAllocator = this.allocator;
     let failure: unknown = null;
 
     try {
       let assignments: Assignment[];
       try {
-        assignments = await this.allocator.allocate(observation);
+        assignments = await attemptAllocator.allocate(observation);
       } catch (caught) {
         failure = caught;
         if (this.sim.world.config.allocation.onFailure !== 'fallback-fcfs') {
           this.sim.skipAllocation(seq);
-          this.notifyAllocationResult(failure);
+          this.notifyAllocationResult(failure, attemptAllocator);
           return;
         }
         assignments = new FcfsAllocator().allocate(observation);
@@ -180,7 +183,7 @@ export class SimLoop {
       // A stale result means another turn already resolved this sequence; the
       // simulation ignores it, and the observation still counts as answered.
       this.sim.applyAllocation(seq, assignments);
-      this.notifyAllocationResult(failure);
+      this.notifyAllocationResult(failure, attemptAllocator);
     } catch (caught) {
       // Fallback or apply failed after the observation was taken. Release the
       // pending sequence so the simulation can never wedge.
@@ -189,14 +192,17 @@ export class SimLoop {
       } catch {
         // The sequence was already resolved; nothing left to release.
       }
-      this.notifyAllocationResult(caught);
+      this.notifyAllocationResult(caught, attemptAllocator);
     }
   }
 
-  private notifyAllocationResult(error: unknown | null): void {
+  private notifyAllocationResult(
+    error: unknown | null,
+    allocator: Allocator,
+  ): void {
     if (this.onAllocationResult === undefined) return;
     try {
-      this.onAllocationResult(error);
+      this.onAllocationResult(error, allocator);
     } catch {
       // Observers must not break the simulation loop.
     }

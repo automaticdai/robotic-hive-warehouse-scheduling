@@ -201,7 +201,14 @@ function buildLoop(
     tickMs: nextSim.world.config.movement.tickMs,
     onSnapshot: (snapshot) => handleSnapshot(snapshot, loopGeneration),
     snapshotIntervalMs: SNAPSHOT_INTERVAL_MS,
-    onAllocationResult: handleAllocationResult,
+    onAllocationResult: (error, resultAllocator) => {
+      // Discard results produced by a superseded configuration: an old loop
+      // after init/restart, or a disposed allocator after selectStrategy. They
+      // must not set sticky failures, re-probe health, or emit status.
+      if (loopGeneration !== generation) return;
+      if (resultAllocator !== allocator) return;
+      handleAllocationResult(error);
+    },
   });
 }
 
